@@ -1,6 +1,7 @@
 {
   "imap_server": "imap.qq.com:993",
   "credential_file": "passwd.txt",
+  "ca_cert_file": "",
   "email_name": "mailfs",
   "mailbox_prefix": "*",
   "database_path": "mailfs_cache.db",
@@ -17,5 +18,5 @@
     ".bak",
     ".log"
   ],
-  "allow_insecure_tls": false
+  "allow_insecure_tls": true
 }

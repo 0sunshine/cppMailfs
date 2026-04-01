@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,7 +19,10 @@ class SecureSocket {
   SecureSocket(const SecureSocket&) = delete;
   SecureSocket& operator=(const SecureSocket&) = delete;
 
-  void connect(const std::string& host, std::uint16_t port, bool allow_insecure_tls);
+  void connect(const std::string& host,
+               std::uint16_t port,
+               bool allow_insecure_tls,
+               const std::filesystem::path& ca_cert_file = {});
   void close() noexcept;
   [[nodiscard]] bool is_open() const noexcept;
   void send_all(const std::string& text);

@@ -29,7 +29,8 @@ ImapClient::~ImapClient() {
 void ImapClient::connect(const core::model::AppConfig& config,
                          const std::string& username,
                          const std::string& password) {
-  socket_.connect(config.imap_host, config.imap_port, config.allow_insecure_tls);
+  socket_.connect(
+      config.imap_host, config.imap_port, config.allow_insecure_tls, std::filesystem::u8path(config.ca_cert_file));
 
   const auto greeting = socket_.read_line();
   if (greeting.rfind("* OK", 0) != 0 && greeting.rfind("* PREAUTH", 0) != 0) {

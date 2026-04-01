@@ -47,6 +47,7 @@ core::model::AppConfig JsonConfigLoader::load(const std::filesystem::path& path)
   }
 
   config.credential_file = root.value("credential_file", config.credential_file);
+  config.ca_cert_file = root.value("ca_cert_file", config.ca_cert_file);
   config.email_name = root.value("email_name", config.email_name);
   config.mailbox_prefix = root.value("mailbox_prefix", config.mailbox_prefix);
   config.database_path = root.value("database_path", config.database_path);

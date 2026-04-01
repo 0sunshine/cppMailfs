@@ -13,6 +13,7 @@ struct AppConfig {
   std::string imap_host = "imap.qq.com";
   std::uint16_t imap_port = 993;
   std::string credential_file = "passwd.txt";
+  std::string ca_cert_file;
   std::string email_name = "mailfs";
   std::string mailbox_prefix = "*";
   std::string database_path = "mailfs_cache.db";

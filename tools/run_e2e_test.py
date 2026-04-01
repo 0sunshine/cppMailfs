@@ -202,15 +202,16 @@ def main():
     upload_path.write_bytes(payload)
 
     config = {
-        "imap_server": f"127.0.0.1:{args.port}",
+        "imap_server": f"localhost:{args.port}",
         "credential_file": to_windows_path(passwd_path),
+        "ca_cert_file": to_windows_path(Path(args.cert)),
         "email_name": "mailfs-test",
         "mailbox_prefix": "*",
         "database_path": to_windows_path(db_path),
         "default_block_size": 4096,
         "allowed_folders": [],
         "ignore_extensions": [],
-        "allow_insecure_tls": True,
+        "allow_insecure_tls": False,
     }
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 

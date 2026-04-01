@@ -1,5 +1,6 @@
 #include "mailfs/infra/net/secure_socket.hpp"
 
+#include <fstream>
 #include <cstring>
 #include <stdexcept>
 
@@ -8,6 +9,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
 
 namespace mailfs::infra::net {
 
@@ -32,6 +34,7 @@ struct SecureSocket::Impl {
   mbedtls_net_context net{};
   mbedtls_ssl_context ssl{};
   mbedtls_ssl_config ssl_config{};
+  mbedtls_x509_crt ca_chain{};
   mbedtls_entropy_context entropy{};
   mbedtls_ctr_drbg_context ctr_drbg{};
 
@@ -39,6 +42,7 @@ struct SecureSocket::Impl {
     mbedtls_net_init(&net);
     mbedtls_ssl_init(&ssl);
     mbedtls_ssl_config_init(&ssl_config);
+    mbedtls_x509_crt_init(&ca_chain);
     mbedtls_entropy_init(&entropy);
     mbedtls_ctr_drbg_init(&ctr_drbg);
   }
@@ -46,6 +50,7 @@ struct SecureSocket::Impl {
   ~Impl() {
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&ssl_config);
+    mbedtls_x509_crt_free(&ca_chain);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
     mbedtls_net_free(&net);
@@ -58,7 +63,10 @@ SecureSocket::~SecureSocket() {
   close();
 }
 
-void SecureSocket::connect(const std::string& host, std::uint16_t port, bool allow_insecure_tls) {
+void SecureSocket::connect(const std::string& host,
+                           std::uint16_t port,
+                           bool allow_insecure_tls,
+                           const std::filesystem::path& ca_cert_file) {
   close();
   impl_ = std::make_unique<Impl>();
 
@@ -79,6 +87,26 @@ void SecureSocket::connect(const std::string& host, std::uint16_t port, bool all
       MBEDTLS_SSL_PRESET_DEFAULT);
   if (rc != 0) {
     throw_mbedtls_error("mbedtls_ssl_config_defaults failed", rc);
+  }
+
+  if (!allow_insecure_tls) {
+    if (ca_cert_file.empty()) {
+      throw std::runtime_error("TLS verification requires ca_cert_file to be set or allow_insecure_tls=true");
+    }
+
+    std::ifstream input(ca_cert_file, std::ios::binary);
+    if (!input) {
+      throw std::runtime_error("failed to open CA certificate file: " + ca_cert_file.u8string());
+    }
+
+    std::vector<unsigned char> cert_bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    cert_bytes.push_back('\0');
+    rc = mbedtls_x509_crt_parse(&impl_->ca_chain, cert_bytes.data(), cert_bytes.size());
+    if (rc < 0) {
+      throw_mbedtls_error("mbedtls_x509_crt_parse failed", rc);
+    }
+
+    mbedtls_ssl_conf_ca_chain(&impl_->ssl_config, &impl_->ca_chain, nullptr);
   }
 
   mbedtls_ssl_conf_authmode(&impl_->ssl_config, allow_insecure_tls ? MBEDTLS_SSL_VERIFY_NONE : MBEDTLS_SSL_VERIFY_REQUIRED);
@@ -105,6 +133,13 @@ void SecureSocket::connect(const std::string& host, std::uint16_t port, bool all
   while ((rc = mbedtls_ssl_handshake(&impl_->ssl)) != 0) {
     if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
       throw_mbedtls_error("mbedtls_ssl_handshake failed", rc);
+    }
+  }
+
+  if (!allow_insecure_tls) {
+    const auto verify_flags = mbedtls_ssl_get_verify_result(&impl_->ssl);
+    if (verify_flags != 0) {
+      throw std::runtime_error("TLS certificate verification failed");
     }
   }
 }
