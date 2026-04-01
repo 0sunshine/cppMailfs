@@ -1,0 +1,21 @@
+{
+  "imap_server": "imap.qq.com:993",
+  "credential_file": "passwd.txt",
+  "email_name": "mailfs",
+  "mailbox_prefix": "*",
+  "database_path": "mailfs_cache.db",
+  "default_block_size": 33554432,
+  "block_sizes": {
+    ".mp4": 5242880,
+    ".mkv": 5242880
+  },
+  "allowed_folders": [],
+  "ignore_extensions": [
+    ".ds_store",
+    ".thumbs.db",
+    ".tmp",
+    ".bak",
+    ".log"
+  ],
+  "allow_insecure_tls": false
+}
