@@ -52,7 +52,9 @@ core::model::AppConfig JsonConfigLoader::load(const std::filesystem::path& path)
   config.log_file = root.value("log_file", config.log_file);
   config.log_to_stderr = root.value("log_to_stderr", config.log_to_stderr);
   config.email_name = root.value("email_name", config.email_name);
+  config.owner_name = root.value("owner_name", config.owner_name);
   config.mailbox_prefix = root.value("mailbox_prefix", config.mailbox_prefix);
+  config.download_dir = root.value("download_dir", config.download_dir);
   config.database_path = root.value("database_path", config.database_path);
   config.default_block_size = root.value("default_block_size", config.default_block_size);
   config.cache_fetch_batch_size = root.value("cache_fetch_batch_size", config.cache_fetch_batch_size);

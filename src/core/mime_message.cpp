@@ -1,6 +1,7 @@
 #include "mailfs/core/mime/mime_message.hpp"
 
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <random>
 #include <sstream>
@@ -96,6 +97,17 @@ std::vector<std::uint8_t> base64_decode(const std::string& text) {
   return out;
 }
 
+int hex_value(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  if (ch >= 'A' && ch <= 'F') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
 std::map<std::string, std::string> parse_headers(const std::string& raw_headers) {
   std::map<std::string, std::string> headers;
   std::istringstream stream(raw_headers);
@@ -148,6 +160,61 @@ std::string get_boundary(const std::string& content_type) {
 
 }  // namespace
 
+std::string encode_quoted_printable(const std::vector<std::uint8_t>& bytes) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(bytes.size() * 3);
+  for (const auto byte : bytes) {
+    if ((byte >= 33 && byte <= 60) || (byte >= 62 && byte <= 126) || byte == ' ' || byte == '\t') {
+      out.push_back(static_cast<char>(byte));
+      continue;
+    }
+    if (byte == '\r') {
+      out += "\r";
+      continue;
+    }
+    if (byte == '\n') {
+      out += "\n";
+      continue;
+    }
+    out.push_back('=');
+    out.push_back(kHex[(byte >> 4) & 0x0F]);
+    out.push_back(kHex[byte & 0x0F]);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> decode_quoted_printable(const std::string& text) {
+  std::vector<std::uint8_t> out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const auto ch = text[i];
+    if (ch != '=') {
+      out.push_back(static_cast<std::uint8_t>(ch));
+      continue;
+    }
+    if (i + 1 < text.size() && text[i + 1] == '\n') {
+      ++i;
+      continue;
+    }
+    if (i + 2 < text.size() && text[i + 1] == '\r' && text[i + 2] == '\n') {
+      i += 2;
+      continue;
+    }
+    if (i + 2 < text.size()) {
+      const auto hi = hex_value(text[i + 1]);
+      const auto lo = hex_value(text[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(static_cast<std::uint8_t>(ch));
+  }
+  return out;
+}
+
 std::string MimeMessage::render_multipart_mixed(const std::string& boundary) const {
   std::ostringstream out;
   for (const auto& [key, value] : headers) {
@@ -164,10 +231,13 @@ std::string MimeMessage::render_multipart_mixed(const std::string& boundary) con
 
     const auto encoding_it = part.headers.find("Content-Transfer-Encoding");
     const bool use_base64 = encoding_it != part.headers.end() && encoding_it->second == "base64";
+    const bool use_qp = encoding_it != part.headers.end() && encoding_it->second == "quoted-printable";
     out << "\r\n";
 
     if (use_base64) {
       out << base64_encode(part.body);
+    } else if (use_qp) {
+      out << encode_quoted_printable(part.body);
     } else {
       out.write(reinterpret_cast<const char*>(part.body.data()), static_cast<std::streamsize>(part.body.size()));
     }
@@ -233,6 +303,8 @@ MimeMessage MimeMessage::parse(const std::string& raw_message) {
     const auto encoding_it = part.headers.find("Content-Transfer-Encoding");
     if (encoding_it != part.headers.end() && encoding_it->second == "base64") {
       part.body = base64_decode(body_text);
+    } else if (encoding_it != part.headers.end() && encoding_it->second == "quoted-printable") {
+      part.body = decode_quoted_printable(body_text);
     } else {
       part.body.assign(body_text.begin(), body_text.end());
     }

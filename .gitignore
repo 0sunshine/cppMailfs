@@ -2,3 +2,5 @@
 /mailfs
 /test-output
 /build-nmake
+/build-wsl
+/build-wsl-safe

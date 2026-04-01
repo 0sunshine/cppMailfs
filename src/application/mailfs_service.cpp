@@ -1,5 +1,6 @@
 #include "mailfs/application/mailfs_service.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <fstream>
@@ -94,11 +95,129 @@ std::string decode_quoted_printable(std::string_view text) {
   return decoded;
 }
 
+std::string decode_base64(std::string_view text) {
+  auto decode_char = [](unsigned char ch) -> int {
+    if (ch >= 'A' && ch <= 'Z') {
+      return ch - 'A';
+    }
+    if (ch >= 'a' && ch <= 'z') {
+      return ch - 'a' + 26;
+    }
+    if (ch >= '0' && ch <= '9') {
+      return ch - '0' + 52;
+    }
+    if (ch == '+') {
+      return 62;
+    }
+    if (ch == '/') {
+      return 63;
+    }
+    if (ch == '=') {
+      return -2;
+    }
+    return -1;
+  };
+
+  std::string compact;
+  compact.reserve(text.size());
+  for (const auto ch : text) {
+    if (!std::isspace(static_cast<unsigned char>(ch))) {
+      compact.push_back(static_cast<char>(ch));
+    }
+  }
+
+  if (compact.empty() || (compact.size() % 4) != 0) {
+    return {};
+  }
+
+  std::string decoded;
+  decoded.reserve((compact.size() / 4) * 3);
+  for (std::size_t i = 0; i < compact.size(); i += 4) {
+    const auto a = decode_char(static_cast<unsigned char>(compact[i]));
+    const auto b = decode_char(static_cast<unsigned char>(compact[i + 1]));
+    const auto c = decode_char(static_cast<unsigned char>(compact[i + 2]));
+    const auto d = decode_char(static_cast<unsigned char>(compact[i + 3]));
+    if (a < 0 || b < 0 || c == -1 || d == -1) {
+      return {};
+    }
+
+    const auto triple = (static_cast<unsigned int>(a) << 18) | (static_cast<unsigned int>(b) << 12) |
+                        (static_cast<unsigned int>(c < 0 ? 0 : c) << 6) | static_cast<unsigned int>(d < 0 ? 0 : d);
+    decoded.push_back(static_cast<char>((triple >> 16) & 0xFF));
+    if (c != -2) {
+      decoded.push_back(static_cast<char>((triple >> 8) & 0xFF));
+    }
+    if (d != -2) {
+      decoded.push_back(static_cast<char>(triple & 0xFF));
+    }
+  }
+
+  return decoded;
+}
+
+core::model::MailBlockMetadata parse_cached_metadata_text(std::string_view raw_text) {
+  const auto is_meaningful = [](const core::model::MailBlockMetadata& metadata) {
+    return !metadata.subject.empty() || !metadata.local_path.empty() || metadata.block_seq > 0 || metadata.block_count > 0;
+  };
+
+  const auto normalize_metadata_strings = [](core::model::MailBlockMetadata metadata) {
+    metadata.subject = decode_quoted_printable(metadata.subject);
+    metadata.owner = decode_quoted_printable(metadata.owner);
+    metadata.local_path = decode_quoted_printable(metadata.local_path);
+    metadata.mail_folder = decode_quoted_printable(metadata.mail_folder);
+    return metadata;
+  };
+
+  const auto try_parse = [&](const std::string& candidate) -> std::optional<core::model::MailBlockMetadata> {
+    try {
+      auto metadata = normalize_metadata_strings(core::model::MailBlockMetadata::from_serialized_text(candidate));
+      if (is_meaningful(metadata)) {
+        return metadata;
+      }
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+  };
+
+  const std::string original(raw_text);
+  const auto quoted_printable = decode_quoted_printable(raw_text);
+  if (quoted_printable != original) {
+    if (const auto parsed = try_parse(quoted_printable)) {
+      return *parsed;
+    }
+  }
+
+  if (const auto parsed = try_parse(original)) {
+    return *parsed;
+  }
+
+  const auto base64 = decode_base64(raw_text);
+  if (!base64.empty()) {
+    if (const auto parsed = try_parse(base64)) {
+      return *parsed;
+    }
+
+    const auto qp_from_base64 = decode_quoted_printable(base64);
+    if (qp_from_base64 != base64) {
+      if (const auto parsed = try_parse(qp_from_base64)) {
+        return *parsed;
+      }
+    }
+  }
+
+  throw std::runtime_error("metadata is incomplete or unsupported");
+}
+
 std::vector<unsigned char> read_block(std::ifstream& input, std::size_t max_bytes) {
   std::vector<unsigned char> data(max_bytes);
   input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(max_bytes));
   data.resize(static_cast<std::size_t>(input.gcount()));
   return data;
+}
+
+std::string normalize_slashes(std::string text) {
+  std::replace(text.begin(), text.end(), '\\', '/');
+  return text;
 }
 
 core::model::MailBlockMetadata extract_metadata_from_message(const std::string& raw_message) {
@@ -110,7 +229,7 @@ core::model::MailBlockMetadata extract_metadata_from_message(const std::string& 
     }
     if (it->second.find("application/json") != std::string::npos || it->second.find("text/plain") != std::string::npos) {
       const std::string metadata_text(part.body.begin(), part.body.end());
-      auto metadata = core::model::MailBlockMetadata::from_serialized_text(metadata_text);
+      auto metadata = parse_cached_metadata_text(metadata_text);
       if (metadata.encrypted) {
         metadata.local_path = core::security::decrypt_string(metadata.local_path);
       }
@@ -134,6 +253,7 @@ std::vector<unsigned char> extract_attachment_from_message(const std::string& ra
 std::string build_message(const core::model::MailBlockMetadata& metadata,
                           const std::string& username,
                           const std::string& email_name,
+                          const std::string& attachment_name,
                           const std::vector<unsigned char>& payload) {
   core::mime::MimeMessage message;
   message.headers["From"] = "\"" + email_name + "\" <" + username + ">";
@@ -142,16 +262,15 @@ std::string build_message(const core::model::MailBlockMetadata& metadata,
   message.headers["Date"] = now_rfc2822_utc();
 
   core::mime::MimePart metadata_part;
-  metadata_part.headers["Content-Type"] = "application/json; charset=utf-8";
-  metadata_part.headers["Content-Transfer-Encoding"] = "base64";
-  const auto metadata_text = metadata.to_json_text();
+  metadata_part.headers["Content-Type"] = "text/plain; charset=utf-8";
+  metadata_part.headers["Content-Transfer-Encoding"] = "quoted-printable";
+  const auto metadata_text = metadata.to_legacy_text();
   metadata_part.body.assign(metadata_text.begin(), metadata_text.end());
 
   core::mime::MimePart file_part;
-  file_part.headers["Content-Type"] = "application/octet-stream";
+  file_part.headers["Content-Type"] = "text/plain";
   file_part.headers["Content-Transfer-Encoding"] = "base64";
-  file_part.headers["Content-Disposition"] =
-      "attachment; filename=\"block-" + std::to_string(metadata.block_seq) + ".bin\"";
+  file_part.headers["Content-Disposition"] = "attachment; filename=\"" + attachment_name + "\"";
   file_part.body = payload;
 
   message.parts.push_back(std::move(metadata_part));
@@ -206,12 +325,13 @@ std::vector<std::string> MailfsService::list_mailboxes() {
   return filtered;
 }
 
-std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
+std::size_t MailfsService::cache_mailbox(const std::string& mailbox, CacheProgressCallback progress) {
   ensure_mailbox_selected(mailbox);
   infra::logging::log_info("service", "caching mailbox " + mailbox);
 
   const auto all_uids = transport_.search_all_uids();
   const auto cached_uids = repository_.get_cached_uids(mailbox);
+  const auto total = all_uids.size();
 
   std::vector<std::uint64_t> uncached_uids;
   for (const auto uid : all_uids) {
@@ -220,11 +340,20 @@ std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
     }
   }
 
+  const auto cached_count = total - uncached_uids.size();
+  if (progress) {
+    progress(cached_count, total);
+  }
+
   if (uncached_uids.empty()) {
+    if (progress) {
+      progress(total, total);
+    }
     return 0;
   }
 
   std::size_t fetched_count = 0;
+  std::size_t processed_count = 0;
   const auto batch_size = std::max<std::size_t>(1, config_.cache_fetch_batch_size);
   for (std::size_t offset = 0; offset < uncached_uids.size(); offset += batch_size) {
     const auto end = std::min(offset + batch_size, uncached_uids.size());
@@ -234,7 +363,7 @@ std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
     for (const auto& entry : metadata_entries) {
       core::model::MailBlockMetadata metadata;
       try {
-        metadata = core::model::MailBlockMetadata::from_serialized_text(decode_quoted_printable(entry.metadata_text));
+        metadata = parse_cached_metadata_text(entry.metadata_text);
         if (metadata.encrypted) {
           metadata.local_path = core::security::decrypt_string(metadata.local_path);
         }
@@ -255,6 +384,10 @@ std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
       repository_.upsert_mail_block(entry.uid, metadata);
       ++fetched_count;
     }
+    processed_count += batch.size();
+    if (progress) {
+      progress(cached_count + processed_count, total);
+    }
   }
 
   infra::logging::log_info("service",
@@ -262,8 +395,16 @@ std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
   return fetched_count;
 }
 
-std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(const std::string& mailbox) {
-  return repository_.list_files(mailbox);
+std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(const std::string& mailbox,
+                                                                            ListProgressCallback progress) {
+  auto files = repository_.list_files(mailbox);
+  if (progress) {
+    const auto total = files.size();
+    for (std::size_t i = 0; i < files.size(); ++i) {
+      progress(i + 1, total, files[i].local_path);
+    }
+  }
+  return files;
 }
 
 void MailfsService::delete_message_uid(const std::string& mailbox, std::uint64_t uid) {
@@ -275,10 +416,9 @@ void MailfsService::delete_message_uid(const std::string& mailbox, std::uint64_t
 
 void MailfsService::upload_file(const std::string& mailbox,
                                 const std::filesystem::path& local_file,
-                                const std::string& remote_path) {
+                                BlockProgressCallback progress) {
   ensure_mailbox_selected(mailbox);
-  infra::logging::log_info("service",
-                           "uploading " + local_file.u8string() + " to " + mailbox + ":" + remote_path);
+  infra::logging::log_info("service", "uploading " + local_file.u8string() + " to " + mailbox);
 
   if (!std::filesystem::exists(local_file)) {
     throw std::runtime_error("local file not found: " + local_file.u8string());
@@ -289,11 +429,13 @@ void MailfsService::upload_file(const std::string& mailbox,
   const auto block_count =
       static_cast<std::int32_t>((file_size + block_size - 1) / block_size);
   const auto file_md5 = core::md5_hex(local_file);
+  const auto local_path_text = std::filesystem::absolute(local_file).lexically_normal().u8string();
   const auto encrypted = core::security::should_encrypt_mailbox(mailbox);
   const auto subject_name = encrypted
-                                ? core::security::encrypt_string(std::filesystem::u8path(remote_path).filename().u8string())
-                                : std::filesystem::u8path(remote_path).filename().u8string();
-  const auto stored_remote_path = encrypted ? core::security::encrypt_string(remote_path) : remote_path;
+                                ? core::security::encrypt_string(local_file.filename().u8string())
+                                : local_file.filename().u8string();
+  const auto attachment_name = subject_name;
+  const auto stored_local_path = encrypted ? core::security::encrypt_string(local_path_text) : local_path_text;
 
   std::ifstream input(local_file, std::ios::binary);
   if (!input) {
@@ -310,74 +452,126 @@ void MailfsService::upload_file(const std::string& mailbox,
     metadata.file_size = file_size;
     metadata.block_size = payload.size();
     metadata.create_time = now_iso8601_utc();
-    metadata.owner = username_;
-    metadata.local_path = stored_remote_path;
+    metadata.owner = config_.owner_name;
+    metadata.local_path = stored_local_path;
     metadata.mail_folder = mailbox;
     metadata.block_seq = block_seq;
     metadata.block_count = block_count;
     metadata.encrypted = encrypted;
 
-    transport_.append_message(mailbox, build_message(metadata, username_, config_.email_name, payload));
+    transport_.append_message(mailbox, build_message(metadata, username_, config_.email_name, attachment_name, payload));
+    if (progress) {
+      progress(block_seq, block_count, local_file.filename().u8string());
+    }
   }
 
   infra::logging::log_info("service",
-                           "upload complete for " + remote_path + ", blocks=" + std::to_string(block_count));
+                           "upload complete for " + local_file.u8string() + ", blocks=" + std::to_string(block_count));
 }
 
-void MailfsService::download_file(const std::string& mailbox,
-                                  const std::string& remote_path,
-                                  const std::filesystem::path& output_file) {
+std::filesystem::path MailfsService::download_file(const std::string& mailbox,
+                                                   const std::string& local_path,
+                                                   BlockProgressCallback progress) {
   ensure_mailbox_selected(mailbox);
-  infra::logging::log_info("service",
-                           "downloading " + mailbox + ":" + remote_path + " to " + output_file.u8string());
+  infra::logging::log_info("service", "downloading " + mailbox + ":" + local_path);
 
-  auto cached = repository_.find_file(mailbox, remote_path);
+  auto cached = repository_.find_file(mailbox, local_path);
   if (!cached.has_value()) {
     cache_mailbox(mailbox);
-    cached = repository_.find_file(mailbox, remote_path);
+    cached = repository_.find_file(mailbox, local_path);
   }
 
   if (!cached.has_value()) {
-    throw std::runtime_error("cached file index not found for remote path: " + remote_path);
+    throw std::runtime_error("cached file index not found for local path: " + local_path);
   }
 
   auto file_record = *cached;
   file_record.sort_blocks();
   if (file_record.blocks.size() != static_cast<std::size_t>(file_record.block_count)) {
-    throw std::runtime_error("cached file is incomplete for remote path: " + remote_path);
+    throw std::runtime_error("cached file is incomplete for local path: " + local_path);
   }
 
-  std::vector<std::uint64_t> uids;
-  for (const auto& block : file_record.blocks) {
-    uids.push_back(block.uid);
+  const auto save_path = resolve_download_path(file_record.local_path);
+  const auto save_tmp_path = save_path.parent_path() / (save_path.filename().u8string() + ".tmp");
+  const auto cache_dir = save_path.parent_path() / std::filesystem::u8path("mailfscache_" + file_record.file_md5);
+  const auto file_name = save_path.filename().u8string();
+
+  if (std::filesystem::exists(save_path)) {
+    infra::logging::log_info("service", "download target already exists: " + save_path.u8string());
+    return save_path;
   }
 
-  const auto fetched_messages = transport_.fetch_messages(uids);
-  std::map<std::uint64_t, std::string> by_uid;
-  for (const auto& message : fetched_messages) {
-    by_uid.emplace(message.uid, message.raw_message);
-  }
+  std::filesystem::create_directories(save_path.parent_path());
+  std::filesystem::remove(save_tmp_path);
+  std::filesystem::create_directories(cache_dir);
 
-  if (!output_file.parent_path().empty()) {
-    std::filesystem::create_directories(output_file.parent_path());
-  }
-  std::ofstream output(output_file, std::ios::binary);
-  if (!output) {
-    throw std::runtime_error("failed to open output file: " + output_file.u8string());
-  }
+  const auto total_blocks = static_cast<std::int64_t>(file_record.blocks.size());
+  for (std::size_t idx = 0; idx < file_record.blocks.size(); ++idx) {
+    const auto& block = file_record.blocks[idx];
+    const auto cache_block_path = cache_dir / std::filesystem::u8path(std::to_string(block.block_seq));
+    if (std::filesystem::exists(cache_block_path)) {
+      if (progress) {
+        progress(static_cast<std::int64_t>(idx + 1), total_blocks, file_name);
+      }
+      continue;
+    }
 
-  for (const auto& block : file_record.blocks) {
-    const auto it = by_uid.find(block.uid);
-    if (it == by_uid.end()) {
+    const auto fetched_messages = transport_.fetch_messages({block.uid});
+    if (fetched_messages.empty()) {
       throw std::runtime_error("missing downloaded block uid: " + std::to_string(block.uid));
     }
 
-    const auto payload = extract_attachment_from_message(it->second);
-    output.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    const auto metadata = extract_metadata_from_message(fetched_messages.front().raw_message);
+    const auto payload = extract_attachment_from_message(fetched_messages.front().raw_message);
+    if (core::md5_hex(payload) != block.block_md5) {
+      throw std::runtime_error("block md5 not match for uid: " + std::to_string(block.uid));
+    }
+    if (normalize_slashes(metadata.mail_folder) != normalize_slashes(file_record.mail_folder)) {
+      throw std::runtime_error("mailfolder not match for uid: " + std::to_string(block.uid));
+    }
+    if (normalize_slashes(metadata.local_path) != normalize_slashes(file_record.local_path)) {
+      throw std::runtime_error("localpath not match for uid: " + std::to_string(block.uid));
+    }
+
+    const auto tmp_block_path = cache_block_path.parent_path() / std::filesystem::u8path(cache_block_path.filename().u8string() + ".tmp");
+    {
+      std::ofstream tmp_block(tmp_block_path, std::ios::binary | std::ios::trunc);
+      if (!tmp_block) {
+        throw std::runtime_error("failed to open temp block file: " + tmp_block_path.u8string());
+      }
+      tmp_block.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    }
+    std::filesystem::rename(tmp_block_path, cache_block_path);
+
+    if (progress) {
+      progress(static_cast<std::int64_t>(idx + 1), total_blocks, file_name);
+    }
   }
 
+  {
+    std::ofstream output(save_tmp_path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+      throw std::runtime_error("failed to open output file: " + save_tmp_path.u8string());
+    }
+    for (const auto& block : file_record.blocks) {
+      const auto cache_block_path = cache_dir / std::filesystem::u8path(std::to_string(block.block_seq));
+      std::ifstream input(cache_block_path, std::ios::binary);
+      if (!input) {
+        throw std::runtime_error("failed to open cached block: " + cache_block_path.u8string());
+      }
+      output << input.rdbuf();
+    }
+  }
+
+  if (core::md5_hex(save_tmp_path) != file_record.file_md5) {
+    throw std::runtime_error("file md5 not match for local path: " + local_path);
+  }
+
+  std::filesystem::rename(save_tmp_path, save_path);
+  std::filesystem::remove_all(cache_dir);
   infra::logging::log_info("service",
-                           "download complete for " + remote_path + ", blocks=" + std::to_string(file_record.block_count));
+                           "download complete for " + local_path + ", blocks=" + std::to_string(file_record.block_count));
+  return save_path;
 }
 
 void MailfsService::ensure_connected() {
@@ -411,6 +605,17 @@ std::pair<std::string, std::string> MailfsService::load_credentials() const {
   }
 
   return {username, password};
+}
+
+std::filesystem::path MailfsService::resolve_download_path(const std::string& local_path) const {
+  auto normalized = normalize_slashes(local_path);
+  if (normalized.size() >= 2 && normalized[1] == ':') {
+    normalized = std::string(1, normalized[0]) + normalized.substr(2);
+  }
+  while (!normalized.empty() && normalized.front() == '/') {
+    normalized.erase(normalized.begin());
+  }
+  return std::filesystem::u8path(config_.download_dir) / std::filesystem::u8path(normalized);
 }
 
 }  // namespace mailfs::application

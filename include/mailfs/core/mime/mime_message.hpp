@@ -22,5 +22,7 @@ class MimeMessage {
 };
 
 std::string make_boundary();
+std::string encode_quoted_printable(const std::vector<std::uint8_t>& bytes);
+std::vector<std::uint8_t> decode_quoted_printable(const std::string& text);
 
 }  // namespace mailfs::core::mime

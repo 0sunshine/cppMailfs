@@ -52,6 +52,20 @@ std::string MailBlockMetadata::to_json_text() const {
   return to_json().dump();
 }
 
+std::string MailBlockMetadata::to_legacy_text() const {
+  std::ostringstream stream;
+  stream << "subject:" << subject << "\r\n";
+  stream << "filemd5:" << file_md5 << "\r\n";
+  stream << "blockmd5:" << block_md5 << "\r\n";
+  stream << "filesize:" << file_size << "\r\n";
+  stream << "blocksize:" << block_size << "\r\n";
+  stream << "createtime:" << create_time << "\r\n";
+  stream << "owner:" << owner << "\r\n";
+  stream << "localpath:" << local_path << "\r\n";
+  stream << "mailfolder:" << mail_folder << "\r\n";
+  return stream.str();
+}
+
 MailBlockMetadata MailBlockMetadata::from_json(const nlohmann::json& json_value) {
   MailBlockMetadata metadata;
   metadata.subject = json_value.at("subject").get<std::string>();

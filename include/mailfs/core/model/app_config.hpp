@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +19,9 @@ struct AppConfig {
   std::string log_file = "mailfs.log";
   bool log_to_stderr = true;
   std::string email_name = "mailfs";
+  std::string owner_name = "sunshine";
   std::string mailbox_prefix = "*";
+  std::string download_dir = "downloads";
   std::string database_path = "mailfs_cache.db";
   std::size_t default_block_size = 512u * 65536u;
   std::size_t cache_fetch_batch_size = 32;

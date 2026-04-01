@@ -20,8 +20,25 @@ void print_usage() {
       << "  mailfs_cli [--config path] cache-mailbox <mailbox>\n"
       << "  mailfs_cli [--config path] list-cache <mailbox>\n"
       << "  mailfs_cli [--config path] delete-uid <mailbox> <uid>\n"
-      << "  mailfs_cli [--config path] upload <mailbox> <local-file> <remote-path>\n"
-      << "  mailfs_cli [--config path] download <mailbox> <remote-path> <output-file>\n";
+      << "  mailfs_cli [--config path] upload <mailbox> <local-file>\n"
+      << "  mailfs_cli [--config path] download <mailbox> <local-path>\n";
+}
+
+void print_count_progress(const std::string& label, std::size_t done, std::size_t total) {
+  std::cerr << '\r' << '[' << label << "] " << done << '/' << total;
+  if (total == 0 || done >= total) {
+    std::cerr << '\n';
+  }
+}
+
+void print_block_progress(const std::string& label,
+                          std::int64_t current_block,
+                          std::int64_t total_blocks,
+                          const std::string& file_name) {
+  std::cerr << '\r' << '[' << label << "] " << file_name << ' ' << current_block << '/' << total_blocks;
+  if (total_blocks == 0 || current_block >= total_blocks) {
+    std::cerr << '\n';
+  }
 }
 
 int run_cli(std::vector<std::string> args) {
@@ -64,7 +81,9 @@ int run_cli(std::vector<std::string> args) {
         print_usage();
         return 1;
       }
-      const auto count = service.cache_mailbox(args[1]);
+      const auto count = service.cache_mailbox(args[1], [](std::size_t done, std::size_t total) {
+        print_count_progress("cache-mailbox", done, total);
+      });
       std::cout << "cached messages: " << count << '\n';
       return 0;
     }
@@ -74,7 +93,14 @@ int run_cli(std::vector<std::string> args) {
         print_usage();
         return 1;
       }
-      const auto files = service.list_cached_files(args[1]);
+      const auto files = service.list_cached_files(args[1], [](std::size_t done,
+                                                               std::size_t total,
+                                                               const std::string& local_path) {
+        std::cerr << '\r' << "[list-cache] " << done << '/' << total << ' ' << local_path;
+        if (total == 0 || done >= total) {
+          std::cerr << '\n';
+        }
+      });
       for (const auto& file : files) {
         std::cout << file.local_path << " blocks=" << file.block_count << " size=" << file.file_size << '\n';
       }
@@ -82,11 +108,15 @@ int run_cli(std::vector<std::string> args) {
     }
 
     if (command == "upload") {
-      if (args.size() != 4) {
+      if (args.size() != 3) {
         print_usage();
         return 1;
       }
-      service.upload_file(args[1], std::filesystem::u8path(args[2]), args[3]);
+      service.upload_file(args[1], std::filesystem::u8path(args[2]), [](std::int64_t current_block,
+                                                                        std::int64_t total_blocks,
+                                                                        const std::string& file_name) {
+        print_block_progress("upload", current_block, total_blocks, file_name);
+      });
       std::cout << "upload complete\n";
       return 0;
     }
@@ -102,12 +132,16 @@ int run_cli(std::vector<std::string> args) {
     }
 
     if (command == "download") {
-      if (args.size() != 4) {
+      if (args.size() != 3) {
         print_usage();
         return 1;
       }
-      service.download_file(args[1], args[2], std::filesystem::u8path(args[3]));
-      std::cout << "download complete\n";
+      const auto output_path = service.download_file(args[1], args[2], [](std::int64_t current_block,
+                                                                          std::int64_t total_blocks,
+                                                                          const std::string& file_name) {
+        print_block_progress("download", current_block, total_blocks, file_name);
+      });
+      std::cout << "download complete: " << output_path.u8string() << '\n';
       return 0;
     }
 

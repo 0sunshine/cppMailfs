@@ -30,6 +30,7 @@ struct MailBlockMetadata {
 
   [[nodiscard]] nlohmann::json to_json() const;
   [[nodiscard]] std::string to_json_text() const;
+  [[nodiscard]] std::string to_legacy_text() const;
 
   static MailBlockMetadata from_json(const nlohmann::json& json_value);
   static MailBlockMetadata from_json_text(const std::string& json_text);
