@@ -1,4 +1,5 @@
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -6,6 +7,7 @@
 #include "mailfs/application/mailfs_service.hpp"
 #include "mailfs/infra/config/json_config_loader.hpp"
 #include "mailfs/infra/imap/imap_client.hpp"
+#include "mailfs/infra/platform/utf8.hpp"
 #include "mailfs/infra/storage/sqlite_cache_repository.hpp"
 
 namespace {
@@ -16,15 +18,13 @@ void print_usage() {
       << "  mailfs_cli [--config path] list-mailboxes\n"
       << "  mailfs_cli [--config path] cache-mailbox <mailbox>\n"
       << "  mailfs_cli [--config path] list-cache <mailbox>\n"
+      << "  mailfs_cli [--config path] delete-uid <mailbox> <uid>\n"
       << "  mailfs_cli [--config path] upload <mailbox> <local-file> <remote-path>\n"
       << "  mailfs_cli [--config path] download <mailbox> <remote-path> <output-file>\n";
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
+int run_cli(std::vector<std::string> args) {
   try {
-    std::vector<std::string> args(argv + 1, argv + argc);
     std::string config_path = "config/mailfs.json";
 
     if (args.size() >= 2 && args[0] == "--config") {
@@ -37,8 +37,8 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    auto config = mailfs::infra::config::JsonConfigLoader::load(config_path);
-    mailfs::infra::storage::SQLiteCacheRepository repository(config.database_path);
+    auto config = mailfs::infra::config::JsonConfigLoader::load(std::filesystem::u8path(config_path));
+    mailfs::infra::storage::SQLiteCacheRepository repository(std::filesystem::u8path(config.database_path));
     mailfs::infra::imap::ImapClient client;
     mailfs::application::MailfsService service(config, client, repository);
 
@@ -77,8 +77,18 @@ int main(int argc, char** argv) {
         print_usage();
         return 1;
       }
-      service.upload_file(args[1], args[2], args[3]);
+      service.upload_file(args[1], std::filesystem::u8path(args[2]), args[3]);
       std::cout << "upload complete\n";
+      return 0;
+    }
+
+    if (command == "delete-uid") {
+      if (args.size() != 3) {
+        print_usage();
+        return 1;
+      }
+      service.delete_message_uid(args[1], std::stoull(args[2]));
+      std::cout << "delete complete\n";
       return 0;
     }
 
@@ -87,7 +97,7 @@ int main(int argc, char** argv) {
         print_usage();
         return 1;
       }
-      service.download_file(args[1], args[2], args[3]);
+      service.download_file(args[1], args[2], std::filesystem::u8path(args[3]));
       std::cout << "download complete\n";
       return 0;
     }
@@ -99,3 +109,25 @@ int main(int argc, char** argv) {
     return 2;
   }
 }
+
+}  // namespace
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+  mailfs::infra::platform::prepare_console_utf8();
+  auto args = mailfs::infra::platform::argv_to_utf8(argc, argv);
+  if (!args.empty()) {
+    args.erase(args.begin());
+  }
+  return run_cli(std::move(args));
+}
+#else
+int main(int argc, char** argv) {
+  mailfs::infra::platform::prepare_console_utf8();
+  auto args = mailfs::infra::platform::argv_to_utf8(argc, argv);
+  if (!args.empty()) {
+    args.erase(args.begin());
+  }
+  return run_cli(std::move(args));
+}
+#endif

@@ -23,6 +23,7 @@ class MailfsService {
   std::vector<std::string> list_mailboxes();
   std::size_t cache_mailbox(const std::string& mailbox);
   std::vector<core::model::CachedFileRecord> list_cached_files(const std::string& mailbox);
+  void delete_message_uid(const std::string& mailbox, std::uint64_t uid);
   void upload_file(const std::string& mailbox,
                    const std::filesystem::path& local_file,
                    const std::string& remote_path);

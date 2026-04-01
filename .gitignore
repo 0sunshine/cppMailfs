@@ -1,2 +1,4 @@
 /build
 /mailfs
+/test-output
+/build-nmake

@@ -29,7 +29,7 @@ core::model::AppConfig JsonConfigLoader::load(const std::filesystem::path& path)
 
   std::ifstream input(path);
   if (!input) {
-    throw std::runtime_error("failed to open config file: " + path.string());
+    throw std::runtime_error("failed to open config file: " + path.u8string());
   }
 
   nlohmann::json root;

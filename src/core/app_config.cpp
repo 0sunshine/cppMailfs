@@ -6,7 +6,7 @@
 namespace mailfs::core::model {
 
 std::size_t AppConfig::block_size_for_file(const std::filesystem::path& file) const {
-  auto ext = file.extension().string();
+  auto ext = file.extension().u8string();
   std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
     return static_cast<char>(std::tolower(ch));
   });
@@ -24,7 +24,7 @@ bool AppConfig::is_allowed_mailbox(const std::string& mailbox) const {
 }
 
 bool AppConfig::should_ignore_file(const std::filesystem::path& file) const {
-  auto name = file.filename().string();
+  auto name = file.filename().u8string();
   std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
     return static_cast<char>(std::tolower(ch));
   });

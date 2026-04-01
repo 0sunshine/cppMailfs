@@ -25,6 +25,7 @@ class IMailTransport {
   virtual void select_mailbox(const std::string& mailbox) = 0;
   virtual std::vector<std::uint64_t> search_all_uids() = 0;
   virtual std::vector<FetchedMessage> fetch_messages(const std::vector<std::uint64_t>& uids) = 0;
+  virtual void delete_message_by_uid(std::uint64_t uid) = 0;
   virtual void append_message(const std::string& mailbox, const std::string& raw_message) = 0;
 };
 

@@ -35,6 +35,7 @@ class ImapClient final : public application::ports::IMailTransport {
   void select_mailbox(const std::string& mailbox) override;
   std::vector<std::uint64_t> search_all_uids() override;
   std::vector<application::ports::FetchedMessage> fetch_messages(const std::vector<std::uint64_t>& uids) override;
+  void delete_message_by_uid(std::uint64_t uid) override;
   void append_message(const std::string& mailbox, const std::string& raw_message) override;
 
  private:

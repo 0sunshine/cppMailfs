@@ -31,3 +31,20 @@ TEST(JsonConfigLoaderTest, LoadsOverridesAndNormalizesExtensions) {
 
   std::filesystem::remove(path);
 }
+
+TEST(JsonConfigLoaderTest, LoadsConfigFromUtf8NamedFile) {
+  const auto path =
+      std::filesystem::temp_directory_path() / std::filesystem::u8path(u8"\u90ae\u4ef6\u914d\u7f6e.json");
+  std::ofstream output(path, std::ios::binary);
+  output << R"({
+    "credential_file": "\u51ed\u636e.txt",
+    "database_path": "\u7f13\u5b58.db"
+  })";
+  output.close();
+
+  const auto config = mailfs::infra::config::JsonConfigLoader::load(path);
+  EXPECT_EQ(config.credential_file, u8"\u51ed\u636e.txt");
+  EXPECT_EQ(config.database_path, u8"\u7f13\u5b58.db");
+
+  std::filesystem::remove(path);
+}

@@ -33,7 +33,7 @@ std::string md5_hex(const std::vector<unsigned char>& bytes) {
 std::string md5_hex(const std::filesystem::path& file_path) {
   std::ifstream input(file_path, std::ios::binary);
   if (!input) {
-    throw std::runtime_error("failed to open file for md5: " + file_path.string());
+    throw std::runtime_error("failed to open file for md5: " + file_path.u8string());
   }
 
   mbedtls_md5_context ctx;

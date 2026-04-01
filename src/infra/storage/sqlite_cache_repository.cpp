@@ -41,8 +41,14 @@ std::string column_text(sqlite3_stmt* stmt, int index) {
 
 SQLiteCacheRepository::SQLiteCacheRepository(std::filesystem::path database_path)
     : database_path_(std::move(database_path)) {
-  if (sqlite3_open(database_path_.string().c_str(), &db_) != SQLITE_OK) {
-    throw std::runtime_error("failed to open sqlite database");
+#ifdef _WIN32
+  const auto native_path = database_path_.native();
+  if (sqlite3_open16(native_path.c_str(), &db_) != SQLITE_OK) {
+#else
+  const auto native_path = database_path_.u8string();
+  if (sqlite3_open(native_path.c_str(), &db_) != SQLITE_OK) {
+#endif
+    throw std::runtime_error("failed to open sqlite database: " + database_path_.u8string());
   }
 }
 
@@ -119,6 +125,45 @@ void SQLiteCacheRepository::upsert_mail_block(std::uint64_t uid, const core::mod
       bind_text(upsert_block.get(), 4, metadata.block_md5);
       sqlite3_bind_int64(upsert_block.get(), 5, static_cast<sqlite3_int64>(metadata.block_size));
       if (sqlite3_step(upsert_block.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(db_));
+      }
+    }
+
+    execute_sql("COMMIT;");
+  } catch (...) {
+    execute_sql("ROLLBACK;");
+    throw;
+  }
+}
+
+void SQLiteCacheRepository::remove_message_uid(const std::string& mailbox, std::uint64_t uid) {
+  execute_sql("BEGIN IMMEDIATE TRANSACTION;");
+  try {
+    std::vector<std::int64_t> file_ids;
+    {
+      Statement find_files(
+          db_,
+          "SELECT DISTINCT f.fileid FROM cache_files f "
+          "INNER JOIN cache_blocks b ON f.fileid = b.fileid "
+          "WHERE f.mailfolder = ? AND b.uid = ?;");
+      bind_text(find_files.get(), 1, mailbox);
+      sqlite3_bind_int64(find_files.get(), 2, static_cast<sqlite3_int64>(uid));
+
+      while (sqlite3_step(find_files.get()) == SQLITE_ROW) {
+        file_ids.push_back(sqlite3_column_int64(find_files.get(), 0));
+      }
+    }
+
+    for (const auto file_id : file_ids) {
+      Statement delete_blocks(db_, "DELETE FROM cache_blocks WHERE fileid = ?;");
+      sqlite3_bind_int64(delete_blocks.get(), 1, static_cast<sqlite3_int64>(file_id));
+      if (sqlite3_step(delete_blocks.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(db_));
+      }
+
+      Statement delete_file(db_, "DELETE FROM cache_files WHERE fileid = ?;");
+      sqlite3_bind_int64(delete_file.get(), 1, static_cast<sqlite3_int64>(file_id));
+      if (sqlite3_step(delete_file.get()) != SQLITE_DONE) {
         throw std::runtime_error(sqlite3_errmsg(db_));
       }
     }

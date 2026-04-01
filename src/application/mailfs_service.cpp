@@ -188,13 +188,19 @@ std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(cons
   return repository_.list_files(mailbox);
 }
 
+void MailfsService::delete_message_uid(const std::string& mailbox, std::uint64_t uid) {
+  ensure_mailbox_selected(mailbox);
+  transport_.delete_message_by_uid(uid);
+  repository_.remove_message_uid(mailbox, uid);
+}
+
 void MailfsService::upload_file(const std::string& mailbox,
                                 const std::filesystem::path& local_file,
                                 const std::string& remote_path) {
   ensure_mailbox_selected(mailbox);
 
   if (!std::filesystem::exists(local_file)) {
-    throw std::runtime_error("local file not found: " + local_file.string());
+    throw std::runtime_error("local file not found: " + local_file.u8string());
   }
 
   const auto file_size = std::filesystem::file_size(local_file);
@@ -204,13 +210,13 @@ void MailfsService::upload_file(const std::string& mailbox,
   const auto file_md5 = core::md5_hex(local_file);
   const auto encrypted = core::security::should_encrypt_mailbox(mailbox);
   const auto subject_name = encrypted
-                                ? core::security::encrypt_string(std::filesystem::path(remote_path).filename().string())
-                                : std::filesystem::path(remote_path).filename().string();
+                                ? core::security::encrypt_string(std::filesystem::u8path(remote_path).filename().u8string())
+                                : std::filesystem::u8path(remote_path).filename().u8string();
   const auto stored_remote_path = encrypted ? core::security::encrypt_string(remote_path) : remote_path;
 
   std::ifstream input(local_file, std::ios::binary);
   if (!input) {
-    throw std::runtime_error("failed to open file for upload: " + local_file.string());
+    throw std::runtime_error("failed to open file for upload: " + local_file.u8string());
   }
 
   for (std::int32_t block_seq = 1; block_seq <= block_count; ++block_seq) {
@@ -251,6 +257,9 @@ void MailfsService::download_file(const std::string& mailbox,
 
   auto file_record = *cached;
   file_record.sort_blocks();
+  if (file_record.blocks.size() != static_cast<std::size_t>(file_record.block_count)) {
+    throw std::runtime_error("cached file is incomplete for remote path: " + remote_path);
+  }
 
   std::vector<std::uint64_t> uids;
   for (const auto& block : file_record.blocks) {
@@ -268,7 +277,7 @@ void MailfsService::download_file(const std::string& mailbox,
   }
   std::ofstream output(output_file, std::ios::binary);
   if (!output) {
-    throw std::runtime_error("failed to open output file: " + output_file.string());
+    throw std::runtime_error("failed to open output file: " + output_file.u8string());
   }
 
   for (const auto& block : file_record.blocks) {
@@ -294,7 +303,7 @@ void MailfsService::ensure_mailbox_selected(const std::string& mailbox) {
 }
 
 std::pair<std::string, std::string> MailfsService::load_credentials() const {
-  std::ifstream input(config_.credential_file);
+  std::ifstream input(std::filesystem::u8path(config_.credential_file));
   if (!input) {
     throw std::runtime_error("failed to open credential file: " + config_.credential_file);
   }

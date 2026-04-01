@@ -106,6 +106,11 @@ std::vector<application::ports::FetchedMessage> ImapClient::fetch_messages(const
   return messages;
 }
 
+void ImapClient::delete_message_by_uid(std::uint64_t uid) {
+  ensure_ok(execute("UID STORE " + std::to_string(uid) + " +FLAGS.SILENT (\\Deleted)"), "UID STORE");
+  ensure_ok(execute("EXPUNGE"), "EXPUNGE");
+}
+
 void ImapClient::append_message(const std::string& mailbox, const std::string& raw_message) {
   std::string payload = raw_message;
   if (payload.size() < 2 || payload.substr(payload.size() - 2) != "\r\n") {

@@ -48,6 +48,7 @@ add_library(mailfs_core
   src/infra/imap/imap_client.cpp
   src/infra/imap/imap_response_parser.cpp
   src/infra/net/secure_socket.cpp
+  src/infra/platform/utf8.cpp
   src/infra/storage/sqlite_cache_repository.cpp
 )
 
@@ -92,8 +93,10 @@ if(MAILFS_BUILD_TESTS)
     tests/config_loader_test.cpp
     tests/imap_response_parser_test.cpp
     tests/mail_block_metadata_test.cpp
+    tests/mailfs_service_test.cpp
     tests/mime_message_test.cpp
     tests/sqlite_cache_repository_test.cpp
+    tests/utf8_test.cpp
   )
 
   target_link_libraries(mailfs_tests
