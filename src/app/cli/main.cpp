@@ -7,6 +7,7 @@
 #include "mailfs/application/mailfs_service.hpp"
 #include "mailfs/infra/config/json_config_loader.hpp"
 #include "mailfs/infra/imap/imap_client.hpp"
+#include "mailfs/infra/logging/logger.hpp"
 #include "mailfs/infra/platform/utf8.hpp"
 #include "mailfs/infra/storage/sqlite_cache_repository.hpp"
 
@@ -25,6 +26,7 @@ void print_usage() {
 
 int run_cli(std::vector<std::string> args) {
   try {
+    mailfs::infra::logging::Logger::instance().configure({});
     std::string config_path = "config/mailfs.json";
 
     if (args.size() >= 2 && args[0] == "--config") {
@@ -38,11 +40,18 @@ int run_cli(std::vector<std::string> args) {
     }
 
     auto config = mailfs::infra::config::JsonConfigLoader::load(std::filesystem::u8path(config_path));
+    mailfs::infra::logging::Logger::instance().configure({
+        mailfs::infra::logging::parse_log_level(config.log_level),
+        std::filesystem::u8path(config.log_file),
+        config.log_to_stderr,
+    });
+    mailfs::infra::logging::log_info("cli", "loaded config from " + config_path);
     mailfs::infra::storage::SQLiteCacheRepository repository(std::filesystem::u8path(config.database_path));
     mailfs::infra::imap::ImapClient client;
     mailfs::application::MailfsService service(config, client, repository);
 
     const auto& command = args[0];
+    mailfs::infra::logging::log_info("cli", "executing command " + command);
     if (command == "list-mailboxes") {
       for (const auto& mailbox : service.list_mailboxes()) {
         std::cout << mailbox << '\n';
@@ -105,6 +114,7 @@ int run_cli(std::vector<std::string> args) {
     print_usage();
     return 1;
   } catch (const std::exception& ex) {
+    mailfs::infra::logging::log_error("cli", ex.what());
     std::cerr << "error: " << ex.what() << '\n';
     return 2;
   }

@@ -11,6 +11,8 @@
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 
+#include "mailfs/infra/logging/logger.hpp"
+
 namespace mailfs::infra::net {
 
 namespace {
@@ -57,7 +59,7 @@ struct SecureSocket::Impl {
   }
 };
 
-SecureSocket::SecureSocket() : impl_(std::make_unique<Impl>()) {}
+SecureSocket::SecureSocket() = default;
 
 SecureSocket::~SecureSocket() {
   close();
@@ -69,6 +71,7 @@ void SecureSocket::connect(const std::string& host,
                            const std::filesystem::path& ca_cert_file) {
   close();
   impl_ = std::make_unique<Impl>();
+  logging::log_info("tls", "opening TLS connection to " + host + ":" + std::to_string(port));
 
   const char* personalization = "mailfs_tls";
   int rc = mbedtls_ctr_drbg_seed(&impl_->ctr_drbg,
@@ -93,6 +96,7 @@ void SecureSocket::connect(const std::string& host,
     if (ca_cert_file.empty()) {
       throw std::runtime_error("TLS verification requires ca_cert_file to be set or allow_insecure_tls=true");
     }
+    logging::log_debug("tls", "loading CA certificate from " + ca_cert_file.u8string());
 
     std::ifstream input(ca_cert_file, std::ios::binary);
     if (!input) {
@@ -111,6 +115,7 @@ void SecureSocket::connect(const std::string& host,
 
   mbedtls_ssl_conf_authmode(&impl_->ssl_config, allow_insecure_tls ? MBEDTLS_SSL_VERIFY_NONE : MBEDTLS_SSL_VERIFY_REQUIRED);
   mbedtls_ssl_conf_rng(&impl_->ssl_config, mbedtls_ctr_drbg_random, &impl_->ctr_drbg);
+  mbedtls_ssl_conf_read_timeout(&impl_->ssl_config, kReadTimeoutMs);
 
   const auto port_text = std::to_string(port);
   rc = mbedtls_net_connect(&impl_->net, host.c_str(), port_text.c_str(), MBEDTLS_NET_PROTO_TCP);
@@ -128,7 +133,7 @@ void SecureSocket::connect(const std::string& host,
     throw_mbedtls_error("mbedtls_ssl_set_hostname failed", rc);
   }
 
-  mbedtls_ssl_set_bio(&impl_->ssl, &impl_->net, mbedtls_net_send, mbedtls_net_recv, nullptr);
+  mbedtls_ssl_set_bio(&impl_->ssl, &impl_->net, mbedtls_net_send, mbedtls_net_recv, mbedtls_net_recv_timeout);
 
   while ((rc = mbedtls_ssl_handshake(&impl_->ssl)) != 0) {
     if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -142,10 +147,13 @@ void SecureSocket::connect(const std::string& host,
       throw std::runtime_error("TLS certificate verification failed");
     }
   }
+
+  logging::log_info("tls", "TLS handshake completed for " + host);
 }
 
 void SecureSocket::close() noexcept {
   if (impl_) {
+    logging::log_debug("tls", "closing TLS socket");
     mbedtls_ssl_close_notify(&impl_->ssl);
   }
   impl_.reset();
@@ -196,6 +204,9 @@ std::string SecureSocket::read_more() {
     }
     if (rc == 0) {
       throw std::runtime_error("remote side closed the TLS connection");
+    }
+    if (rc == MBEDTLS_ERR_SSL_TIMEOUT) {
+      throw std::runtime_error("TLS read timed out while waiting for server response");
     }
     if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
       throw_mbedtls_error("mbedtls_ssl_read failed", rc);

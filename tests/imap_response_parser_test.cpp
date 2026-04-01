@@ -20,6 +20,17 @@ TEST(ImapResponseParserTest, ParsesListSearchAndFetchLines) {
   ASSERT_TRUE(mailbox.has_value());
   EXPECT_EQ(*mailbox, "Archive");
 
+  const auto encoded_mailbox =
+      mailfs::infra::imap::ImapResponseParser::parse_list_mailbox("* LIST (\\HasNoChildren) \"/\" \"&UXZO1mWHTvZZOQ-\"");
+  ASSERT_TRUE(encoded_mailbox.has_value());
+  EXPECT_EQ(*encoded_mailbox, u8"\u5176\u4ed6\u6587\u4ef6\u5939");
+
+  const auto mailbox_name = mailfs::infra::imap::ImapResponseParser::parse_list_mailbox_name(
+      "* LIST (\\HasNoChildren) \"/\" \"&UXZO1mWHTvZZOQ-/&TipOug-pc\"");
+  ASSERT_TRUE(mailbox_name.has_value());
+  EXPECT_EQ(mailbox_name->raw_name, "&UXZO1mWHTvZZOQ-/&TipOug-pc");
+  EXPECT_EQ(mailbox_name->decoded_name, u8"\u5176\u4ed6\u6587\u4ef6\u5939/\u4e2a\u4ebapc");
+
   const auto uids = mailfs::infra::imap::ImapResponseParser::parse_search_uids("* SEARCH 10 11 15");
   ASSERT_EQ(uids.size(), 3u);
   EXPECT_EQ(uids[0], 10u);

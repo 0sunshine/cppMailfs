@@ -5,6 +5,7 @@
 #include <cwchar>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -46,6 +47,27 @@ std::string wide_to_utf8(const wchar_t* text) {
   }
 
   return utf8;
+}
+
+std::wstring utf8_to_wide_impl(std::string_view text) {
+  if (text.empty()) {
+    return {};
+  }
+
+  const auto utf8_length =
+      static_cast<int>(std::min<std::size_t>(text.size(), static_cast<std::size_t>(INT_MAX)));
+  const auto wide_length =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), utf8_length, nullptr, 0);
+  if (wide_length <= 0) {
+    throw std::runtime_error("MultiByteToWideChar failed");
+  }
+
+  std::wstring wide(static_cast<std::size_t>(wide_length), L'\0');
+  if (MultiByteToWideChar(
+          CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), utf8_length, wide.data(), wide_length) != wide_length) {
+    throw std::runtime_error("MultiByteToWideChar failed");
+  }
+  return wide;
 }
 #else
 std::string wide_to_utf8(const std::wstring& text) {
@@ -110,6 +132,10 @@ std::vector<std::string> argv_to_utf8(int argc, wchar_t** argv) {
     args.push_back(wide_to_utf8(argv[i]));
   }
   return args;
+}
+
+std::wstring utf8_to_wide(std::string_view text) {
+  return utf8_to_wide_impl(text);
 }
 #endif
 

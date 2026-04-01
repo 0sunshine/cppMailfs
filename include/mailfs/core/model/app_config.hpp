@@ -14,10 +14,14 @@ struct AppConfig {
   std::uint16_t imap_port = 993;
   std::string credential_file = "passwd.txt";
   std::string ca_cert_file;
+  std::string log_level = "info";
+  std::string log_file = "mailfs.log";
+  bool log_to_stderr = true;
   std::string email_name = "mailfs";
   std::string mailbox_prefix = "*";
   std::string database_path = "mailfs_cache.db";
   std::size_t default_block_size = 512u * 65536u;
+  std::size_t cache_fetch_batch_size = 32;
   std::unordered_map<std::string, std::size_t> block_sizes;
   std::vector<std::string> allowed_folders;
   std::vector<std::string> ignore_extensions;

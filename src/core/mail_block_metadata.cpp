@@ -1,7 +1,9 @@
 #include "mailfs/core/model/mail_block_metadata.hpp"
 
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace mailfs::core::model {
@@ -16,6 +18,15 @@ std::vector<std::string> split(const std::string& text, char delimiter) {
     parts.push_back(item);
   }
   return parts;
+}
+
+std::string trim(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) {
+    return {};
+  }
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
 }
 
 }  // namespace
@@ -57,10 +68,13 @@ MailBlockMetadata MailBlockMetadata::from_json(const nlohmann::json& json_value)
   metadata.encrypted = json_value.value("encrypted", false);
 
   if ((metadata.block_seq == 0 || metadata.block_count == 0) && !metadata.subject.empty()) {
-    const auto subject_info = parse_subject(metadata.subject);
-    metadata.block_seq = subject_info.block_seq;
-    metadata.block_count = subject_info.block_count;
-    metadata.encrypted = metadata.encrypted || subject_info.encrypted;
+    try {
+      const auto subject_info = parse_subject(metadata.subject);
+      metadata.block_seq = subject_info.block_seq;
+      metadata.block_count = subject_info.block_count;
+      metadata.encrypted = metadata.encrypted || subject_info.encrypted;
+    } catch (...) {
+    }
   }
 
   return metadata;
@@ -68,6 +82,61 @@ MailBlockMetadata MailBlockMetadata::from_json(const nlohmann::json& json_value)
 
 MailBlockMetadata MailBlockMetadata::from_json_text(const std::string& json_text) {
   return from_json(nlohmann::json::parse(json_text));
+}
+
+MailBlockMetadata MailBlockMetadata::from_legacy_text(const std::string& text) {
+  std::unordered_map<std::string, std::string> fields;
+  std::stringstream stream(text);
+  std::string line;
+  while (std::getline(stream, line)) {
+    line = trim(line);
+    if (line.empty()) {
+      continue;
+    }
+    const auto separator = line.find(':');
+    if (separator == std::string::npos) {
+      continue;
+    }
+    fields.emplace(trim(line.substr(0, separator)), trim(line.substr(separator + 1)));
+  }
+
+  MailBlockMetadata metadata;
+  metadata.subject = fields["subject"];
+  metadata.file_md5 = fields["filemd5"];
+  metadata.block_md5 = fields["blockmd5"];
+  if (const auto it = fields.find("filesize"); it != fields.end() && !it->second.empty()) {
+    metadata.file_size = std::stoull(it->second);
+  }
+  if (const auto it = fields.find("blocksize"); it != fields.end() && !it->second.empty()) {
+    metadata.block_size = std::stoull(it->second);
+  }
+  metadata.create_time = fields["createtime"];
+  metadata.owner = fields["owner"];
+  metadata.local_path = fields["localpath"];
+  metadata.mail_folder = fields["mailfolder"];
+
+  if (!metadata.subject.empty()) {
+    try {
+      const auto subject_info = parse_subject(metadata.subject);
+      metadata.block_seq = subject_info.block_seq;
+      metadata.block_count = subject_info.block_count;
+      metadata.encrypted = subject_info.encrypted;
+    } catch (...) {
+    }
+  }
+
+  return metadata;
+}
+
+MailBlockMetadata MailBlockMetadata::from_serialized_text(const std::string& text) {
+  const auto trimmed = trim(text);
+  if (trimmed.empty()) {
+    throw std::runtime_error("mail block metadata payload is empty");
+  }
+  if (!trimmed.empty() && trimmed.front() == '{') {
+    return from_json_text(trimmed);
+  }
+  return from_legacy_text(trimmed);
 }
 
 SubjectInfo MailBlockMetadata::parse_subject(const std::string& subject) {

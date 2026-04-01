@@ -13,6 +13,11 @@ struct FetchedMessage {
   std::string raw_message;
 };
 
+struct FetchedMetadata {
+  std::uint64_t uid = 0;
+  std::string metadata_text;
+};
+
 class IMailTransport {
  public:
   virtual ~IMailTransport() = default;
@@ -24,6 +29,7 @@ class IMailTransport {
   virtual std::vector<std::string> list_mailboxes(const std::string& pattern) = 0;
   virtual void select_mailbox(const std::string& mailbox) = 0;
   virtual std::vector<std::uint64_t> search_all_uids() = 0;
+  virtual std::vector<FetchedMetadata> fetch_metadata(const std::vector<std::uint64_t>& uids) = 0;
   virtual std::vector<FetchedMessage> fetch_messages(const std::vector<std::uint64_t>& uids) = 0;
   virtual void delete_message_by_uid(std::uint64_t uid) = 0;
   virtual void append_message(const std::string& mailbox, const std::string& raw_message) = 0;

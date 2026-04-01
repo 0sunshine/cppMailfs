@@ -1,6 +1,7 @@
 #include "mailfs/application/mailfs_service.hpp"
 
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -11,6 +12,7 @@
 #include "mailfs/core/mime/mime_message.hpp"
 #include "mailfs/core/model/mail_block_metadata.hpp"
 #include "mailfs/core/security/xor_codec.hpp"
+#include "mailfs/infra/logging/logger.hpp"
 
 namespace mailfs::application {
 
@@ -51,6 +53,47 @@ std::string now_rfc2822_utc() {
   return out.str();
 }
 
+std::string decode_quoted_printable(std::string_view text) {
+  auto decode_hex = [](char ch) -> int {
+    if (ch >= '0' && ch <= '9') {
+      return ch - '0';
+    }
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (ch >= 'A' && ch <= 'F') {
+      return ch - 'A' + 10;
+    }
+    return -1;
+  };
+
+  std::string decoded;
+  decoded.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] != '=') {
+      decoded.push_back(text[i]);
+      continue;
+    }
+    if (i + 1 < text.size() && text[i + 1] == '\n') {
+      ++i;
+      continue;
+    }
+    if (i + 2 < text.size() && text[i + 1] == '\r' && text[i + 2] == '\n') {
+      i += 2;
+      continue;
+    }
+    if (i + 2 < text.size()) {
+      const auto high = decode_hex(text[i + 1]);
+      const auto low = decode_hex(text[i + 2]);
+      if (high >= 0 && low >= 0) {
+        decoded.push_back(static_cast<char>((high << 4) | low));
+        i += 2;
+        continue;
+      }
+    }
+    decoded.push_back(text[i]);
+  }
+  return decoded;
+}
+
 std::vector<unsigned char> read_block(std::ifstream& input, std::size_t max_bytes) {
   std::vector<unsigned char> data(max_bytes);
   input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(max_bytes));
@@ -66,8 +109,8 @@ core::model::MailBlockMetadata extract_metadata_from_message(const std::string& 
       continue;
     }
     if (it->second.find("application/json") != std::string::npos || it->second.find("text/plain") != std::string::npos) {
-      const std::string json_text(part.body.begin(), part.body.end());
-      auto metadata = core::model::MailBlockMetadata::from_json_text(json_text);
+      const std::string metadata_text(part.body.begin(), part.body.end());
+      auto metadata = core::model::MailBlockMetadata::from_serialized_text(metadata_text);
       if (metadata.encrypted) {
         metadata.local_path = core::security::decrypt_string(metadata.local_path);
       }
@@ -116,6 +159,10 @@ std::string build_message(const core::model::MailBlockMetadata& metadata,
   return message.render_multipart_mixed(core::mime::make_boundary());
 }
 
+bool is_cacheable_metadata(const core::model::MailBlockMetadata& metadata) {
+  return !metadata.subject.empty() && !metadata.local_path.empty() && metadata.block_seq > 0 && metadata.block_count > 0;
+}
+
 }  // namespace
 
 MailfsService::MailfsService(core::model::AppConfig config,
@@ -130,20 +177,24 @@ void MailfsService::connect() {
     return;
   }
 
+  infra::logging::log_info("service", "connecting to IMAP server " + config_.imap_host + ":" + std::to_string(config_.imap_port));
   auto credentials = load_credentials();
   username_ = std::move(credentials.first);
   password_ = std::move(credentials.second);
   transport_.connect(config_, username_, password_);
   connected_ = true;
+  infra::logging::log_info("service", "IMAP session established for user " + username_);
 }
 
 void MailfsService::disconnect() noexcept {
   transport_.disconnect();
   connected_ = false;
+  infra::logging::log_info("service", "IMAP session closed");
 }
 
 std::vector<std::string> MailfsService::list_mailboxes() {
   ensure_connected();
+  infra::logging::log_debug("service", "listing mailboxes with prefix " + config_.mailbox_prefix);
   auto mailboxes = transport_.list_mailboxes(config_.mailbox_prefix.empty() ? "*" : config_.mailbox_prefix);
 
   std::vector<std::string> filtered;
@@ -157,6 +208,7 @@ std::vector<std::string> MailfsService::list_mailboxes() {
 
 std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
   ensure_mailbox_selected(mailbox);
+  infra::logging::log_info("service", "caching mailbox " + mailbox);
 
   const auto all_uids = transport_.search_all_uids();
   const auto cached_uids = repository_.get_cached_uids(mailbox);
@@ -172,16 +224,42 @@ std::size_t MailfsService::cache_mailbox(const std::string& mailbox) {
     return 0;
   }
 
-  const auto messages = transport_.fetch_messages(uncached_uids);
-  for (const auto& message : messages) {
-    auto metadata = extract_metadata_from_message(message.raw_message);
-    if (metadata.mail_folder.empty()) {
-      metadata.mail_folder = mailbox;
+  std::size_t fetched_count = 0;
+  const auto batch_size = std::max<std::size_t>(1, config_.cache_fetch_batch_size);
+  for (std::size_t offset = 0; offset < uncached_uids.size(); offset += batch_size) {
+    const auto end = std::min(offset + batch_size, uncached_uids.size());
+    std::vector<std::uint64_t> batch(uncached_uids.begin() + static_cast<std::ptrdiff_t>(offset),
+                                     uncached_uids.begin() + static_cast<std::ptrdiff_t>(end));
+    const auto metadata_entries = transport_.fetch_metadata(batch);
+    for (const auto& entry : metadata_entries) {
+      core::model::MailBlockMetadata metadata;
+      try {
+        metadata = core::model::MailBlockMetadata::from_serialized_text(decode_quoted_printable(entry.metadata_text));
+        if (metadata.encrypted) {
+          metadata.local_path = core::security::decrypt_string(metadata.local_path);
+        }
+      } catch (const std::exception& ex) {
+        infra::logging::log_warn("service",
+                                 "skipping uid " + std::to_string(entry.uid) + " while caching " + mailbox + ": " + ex.what());
+        continue;
+      }
+      if (!is_cacheable_metadata(metadata)) {
+        infra::logging::log_warn("service",
+                                 "skipping uid " + std::to_string(entry.uid) +
+                                     " because metadata is incomplete or unsupported");
+        continue;
+      }
+      if (metadata.mail_folder.empty()) {
+        metadata.mail_folder = mailbox;
+      }
+      repository_.upsert_mail_block(entry.uid, metadata);
+      ++fetched_count;
     }
-    repository_.upsert_mail_block(message.uid, metadata);
   }
 
-  return messages.size();
+  infra::logging::log_info("service",
+                           "mailbox " + mailbox + " fetched " + std::to_string(fetched_count) + " uncached messages");
+  return fetched_count;
 }
 
 std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(const std::string& mailbox) {
@@ -190,6 +268,7 @@ std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(cons
 
 void MailfsService::delete_message_uid(const std::string& mailbox, std::uint64_t uid) {
   ensure_mailbox_selected(mailbox);
+  infra::logging::log_warn("service", "deleting uid " + std::to_string(uid) + " from mailbox " + mailbox);
   transport_.delete_message_by_uid(uid);
   repository_.remove_message_uid(mailbox, uid);
 }
@@ -198,6 +277,8 @@ void MailfsService::upload_file(const std::string& mailbox,
                                 const std::filesystem::path& local_file,
                                 const std::string& remote_path) {
   ensure_mailbox_selected(mailbox);
+  infra::logging::log_info("service",
+                           "uploading " + local_file.u8string() + " to " + mailbox + ":" + remote_path);
 
   if (!std::filesystem::exists(local_file)) {
     throw std::runtime_error("local file not found: " + local_file.u8string());
@@ -238,12 +319,17 @@ void MailfsService::upload_file(const std::string& mailbox,
 
     transport_.append_message(mailbox, build_message(metadata, username_, config_.email_name, payload));
   }
+
+  infra::logging::log_info("service",
+                           "upload complete for " + remote_path + ", blocks=" + std::to_string(block_count));
 }
 
 void MailfsService::download_file(const std::string& mailbox,
                                   const std::string& remote_path,
                                   const std::filesystem::path& output_file) {
   ensure_mailbox_selected(mailbox);
+  infra::logging::log_info("service",
+                           "downloading " + mailbox + ":" + remote_path + " to " + output_file.u8string());
 
   auto cached = repository_.find_file(mailbox, remote_path);
   if (!cached.has_value()) {
@@ -289,6 +375,9 @@ void MailfsService::download_file(const std::string& mailbox,
     const auto payload = extract_attachment_from_message(it->second);
     output.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
   }
+
+  infra::logging::log_info("service",
+                           "download complete for " + remote_path + ", blocks=" + std::to_string(file_record.block_count));
 }
 
 void MailfsService::ensure_connected() {
@@ -299,6 +388,7 @@ void MailfsService::ensure_connected() {
 
 void MailfsService::ensure_mailbox_selected(const std::string& mailbox) {
   ensure_connected();
+  infra::logging::log_debug("service", "selecting mailbox " + mailbox);
   transport_.select_mailbox(mailbox);
 }
 

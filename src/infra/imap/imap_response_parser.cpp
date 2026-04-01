@@ -3,7 +3,38 @@
 #include <regex>
 #include <sstream>
 
+#include "mailfs/infra/imap/imap_utf7.hpp"
+
 namespace mailfs::infra::imap {
+
+namespace {
+
+std::optional<std::string> extract_raw_list_mailbox(std::string_view line, const std::string& literal_mailbox) {
+  if (line.rfind("* LIST", 0) != 0) {
+    return std::nullopt;
+  }
+
+  if (!literal_mailbox.empty()) {
+    return literal_mailbox;
+  }
+
+  if (line.size() >= 2 && line.back() == '"' && line.find('"') != std::string_view::npos) {
+    const auto last_quote = line.find_last_of('"');
+    const auto prev_quote = line.substr(0, last_quote).find_last_of('"');
+    if (prev_quote != std::string_view::npos) {
+      return std::string(line.substr(prev_quote + 1, last_quote - prev_quote - 1));
+    }
+  }
+
+  const auto last_space = line.find_last_of(' ');
+  if (last_space == std::string_view::npos || last_space + 1 >= line.size()) {
+    return std::nullopt;
+  }
+
+  return std::string(line.substr(last_space + 1));
+}
+
+}  // namespace
 
 std::optional<std::size_t> ImapResponseParser::literal_size_from_line(std::string_view line) {
   static const std::regex pattern(R"(\{(\d+)\}\s*$)");
@@ -31,28 +62,20 @@ std::optional<TaggedStatus> ImapResponseParser::parse_tagged_status(std::string_
 
 std::optional<std::string> ImapResponseParser::parse_list_mailbox(std::string_view line,
                                                                   const std::string& literal_mailbox) {
-  if (line.rfind("* LIST", 0) != 0) {
+  const auto mailbox = parse_list_mailbox_name(line, literal_mailbox);
+  if (!mailbox.has_value()) {
     return std::nullopt;
   }
+  return mailbox->decoded_name;
+}
 
-  if (!literal_mailbox.empty()) {
-    return literal_mailbox;
-  }
-
-  if (line.size() >= 2 && line.back() == '"' && line.find('"') != std::string_view::npos) {
-    const auto last_quote = line.find_last_of('"');
-    const auto prev_quote = line.substr(0, last_quote).find_last_of('"');
-    if (prev_quote != std::string_view::npos) {
-      return std::string(line.substr(prev_quote + 1, last_quote - prev_quote - 1));
-    }
-  }
-
-  const auto last_space = line.find_last_of(' ');
-  if (last_space == std::string_view::npos || last_space + 1 >= line.size()) {
+std::optional<ListMailboxName> ImapResponseParser::parse_list_mailbox_name(std::string_view line,
+                                                                            const std::string& literal_mailbox) {
+  const auto raw_name = extract_raw_list_mailbox(line, literal_mailbox);
+  if (!raw_name.has_value()) {
     return std::nullopt;
   }
-
-  return std::string(line.substr(last_space + 1));
+  return ListMailboxName{*raw_name, decode_imap_utf7(*raw_name)};
 }
 
 std::vector<std::uint64_t> ImapResponseParser::parse_search_uids(std::string_view line) {

@@ -48,10 +48,14 @@ core::model::AppConfig JsonConfigLoader::load(const std::filesystem::path& path)
 
   config.credential_file = root.value("credential_file", config.credential_file);
   config.ca_cert_file = root.value("ca_cert_file", config.ca_cert_file);
+  config.log_level = root.value("log_level", config.log_level);
+  config.log_file = root.value("log_file", config.log_file);
+  config.log_to_stderr = root.value("log_to_stderr", config.log_to_stderr);
   config.email_name = root.value("email_name", config.email_name);
   config.mailbox_prefix = root.value("mailbox_prefix", config.mailbox_prefix);
   config.database_path = root.value("database_path", config.database_path);
   config.default_block_size = root.value("default_block_size", config.default_block_size);
+  config.cache_fetch_batch_size = root.value("cache_fetch_batch_size", config.cache_fetch_batch_size);
   config.allow_insecure_tls = root.value("allow_insecure_tls", config.allow_insecure_tls);
 
   if (const auto it = root.find("block_sizes"); it != root.end()) {

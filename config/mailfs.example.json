@@ -2,10 +2,14 @@
   "imap_server": "imap.qq.com:993",
   "credential_file": "passwd.txt",
   "ca_cert_file": "",
+  "log_level": "info",
+  "log_file": "logs/mailfs.log",
+  "log_to_stderr": true,
   "email_name": "mailfs",
   "mailbox_prefix": "*",
   "database_path": "mailfs_cache.db",
   "default_block_size": 33554432,
+  "cache_fetch_batch_size": 32,
   "block_sizes": {
     ".mp4": 5242880,
     ".mkv": 5242880

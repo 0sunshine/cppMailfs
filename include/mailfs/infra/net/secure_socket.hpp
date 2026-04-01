@@ -28,10 +28,11 @@ class SecureSocket {
   void send_all(const std::string& text);
   void send_all(const std::vector<std::uint8_t>& bytes);
   [[nodiscard]] std::string read_line();
- [[nodiscard]] std::string read_exact(std::size_t bytes);
+  [[nodiscard]] std::string read_exact(std::size_t bytes);
 
  private:
   struct Impl;
+  static constexpr std::uint32_t kReadTimeoutMs = 30000;
 
   SocketPlatform platform_;
   std::unique_ptr<Impl> impl_;

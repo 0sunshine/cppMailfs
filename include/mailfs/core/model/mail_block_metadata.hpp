@@ -33,6 +33,8 @@ struct MailBlockMetadata {
 
   static MailBlockMetadata from_json(const nlohmann::json& json_value);
   static MailBlockMetadata from_json_text(const std::string& json_text);
+  static MailBlockMetadata from_legacy_text(const std::string& text);
+  static MailBlockMetadata from_serialized_text(const std::string& text);
   static SubjectInfo parse_subject(const std::string& subject);
   static std::string make_subject(const std::string& file_name,
                                   bool encrypted,

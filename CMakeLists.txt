@@ -30,6 +30,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(sqlite_amalgamation)
 
+FetchContent_Declare(
+  log4cplus
+  URL https://github.com/log4cplus/log4cplus/releases/download/REL_2_1_2/log4cplus-2.1.2.tar.xz
+)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(LOG4CPLUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(LOG4CPLUS_BUILD_LOGGINGSERVER OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(log4cplus)
+
 add_library(sqlite3_vendor STATIC
   ${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c
 )
@@ -47,6 +56,8 @@ add_library(mailfs_core
   src/infra/config/json_config_loader.cpp
   src/infra/imap/imap_client.cpp
   src/infra/imap/imap_response_parser.cpp
+  src/infra/imap/imap_utf7.cpp
+  src/infra/logging/logger.cpp
   src/infra/net/secure_socket.cpp
   src/infra/platform/utf8.cpp
   src/infra/storage/sqlite_cache_repository.cpp
@@ -59,6 +70,7 @@ target_include_directories(mailfs_core
 
 target_link_libraries(mailfs_core
   PUBLIC
+    log4cplus::log4cplus
     nlohmann_json::nlohmann_json
     mbedtls
     mbedx509
@@ -92,6 +104,8 @@ if(MAILFS_BUILD_TESTS)
   add_executable(mailfs_tests
     tests/config_loader_test.cpp
     tests/imap_response_parser_test.cpp
+    tests/imap_utf7_test.cpp
+    tests/logger_test.cpp
     tests/mail_block_metadata_test.cpp
     tests/mailfs_service_test.cpp
     tests/mime_message_test.cpp
