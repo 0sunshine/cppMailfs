@@ -65,19 +65,20 @@ def build_seed_message(subject: str, file_md5: str, block_md5: str, file_size: i
 
 
 def seed_large_file_records(store_path: Path):
+    mailbox = "其他文件夹/codex测试"
     scenarios = [
         {"path": "/vault/archive-1g.iso", "size": 1073741824, "block_size": 134217728},
         {"path": "/vault/archive-1p1g.iso", "size": 1181116006, "block_size": 134217728},
         {"path": "/vault/archive-1p3g.iso", "size": 1395864371, "block_size": 268435456},
     ]
 
-    store_data = {"users": {}, "mailboxes": {"Archive": []}, "next_uid": 1}
+    store_data = {"users": {}, "mailboxes": {mailbox: []}, "next_uid": 1}
     uid = 1
     for scenario in scenarios:
         block_count = math.ceil(scenario["size"] / scenario["block_size"])
         for block_seq in range(1, block_count + 1):
             subject = f'{Path(scenario["path"]).name}/plain/{block_seq}-{block_count}'
-            store_data["mailboxes"]["Archive"].append(
+            store_data["mailboxes"][mailbox].append(
                 {
                     "uid": uid,
                     "raw_message": build_seed_message(
@@ -90,7 +91,7 @@ def seed_large_file_records(store_path: Path):
                         ),
                         owner="seed@example.com",
                         local_path=scenario["path"],
-                        mailbox="Archive",
+                        mailbox=mailbox,
                         block_seq=block_seq,
                         block_count=block_count,
                     ),
@@ -100,7 +101,7 @@ def seed_large_file_records(store_path: Path):
             uid += 1
     store_data["next_uid"] = uid
     store_path.write_text(json.dumps(store_data, indent=2), encoding="utf-8")
-    return scenarios
+    return mailbox, scenarios
 
 
 def run(args, cwd=None):
@@ -287,7 +288,7 @@ def main():
     upload_path = work_dir / "upload.bin"
     download_root = work_dir / "downloads"
 
-    large_file_scenarios = seed_large_file_records(store_path)
+    mailbox_name, large_file_scenarios = seed_large_file_records(store_path)
     store_data = json.loads(store_path.read_text(encoding="utf-8"))
     store_data["users"][args.username] = args.password
     store_path.write_text(json.dumps(store_data, indent=2), encoding="utf-8")
@@ -298,19 +299,40 @@ def main():
     upload_path.write_bytes(payload)
 
     config = {
-        "imap_server": f"localhost:{args.port}",
-        "credential_file": to_windows_path(passwd_path),
-        "ca_cert_file": to_windows_path(Path(args.cert)),
-        "email_name": "mailfs-test",
-        "mailbox_prefix": "*",
-        "download_dir": to_windows_path(download_root),
-        "http_listen_addr": f"127.0.0.1:{args.http_port}",
-        "http_copy_addr": f"http://127.0.0.1:{args.http_port}",
-        "database_path": to_windows_path(db_path),
-        "default_block_size": 4096,
-        "allowed_folders": [],
-        "ignore_extensions": [],
-        "allow_insecure_tls": False,
+        "imap": {
+            "server": f"localhost:{args.port}",
+            "credential_file": to_windows_path(passwd_path),
+            "ca_cert_file": to_windows_path(Path(args.cert)),
+            "allow_insecure_tls": False,
+        },
+        "logging": {
+            "level": "info",
+            "file": to_windows_path(work_dir / "mailfs-e2e.log"),
+            "to_stderr": False,
+            "max_file_size": 1048576,
+            "max_files": 2,
+        },
+        "identity": {
+            "email_name": "mailfs-test",
+        },
+        "mailbox": {
+            "default": mailbox_name,
+            "allowed_folders": [],
+        },
+        "storage": {
+            "download_dir": to_windows_path(download_root),
+            "database_path": to_windows_path(db_path),
+        },
+        "http": {
+            "listen_addr": f"127.0.0.1:{args.http_port}",
+            "copy_addr": f"http://127.0.0.1:{args.http_port}",
+        },
+        "cache": {
+            "default_block_size": 4096,
+        },
+        "upload": {
+            "ignore_extensions": [],
+        },
     }
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
@@ -342,13 +364,15 @@ def main():
     try:
         wait_for_port(args.port)
 
-        run_client(args.client_exe, config_path, repo_root, ["list-mailboxes"])
-        run_client(args.client_exe, config_path, repo_root, ["upload", "Archive", upload_path])
-        run_client(args.client_exe, config_path, repo_root, ["cache-mailbox", "Archive"])
-        cache_list = run_client(args.client_exe, config_path, repo_root, ["list-cache", "Archive"])
-        expected_blocks = math.ceil(len(payload) / config["default_block_size"])
+        list_mailboxes = run_client(args.client_exe, config_path, repo_root, ["list-mailboxes"])
+        if mailbox_name not in list_mailboxes.stdout:
+            raise RuntimeError(f"default mailbox missing from list-mailboxes output: {mailbox_name}")
+        run_client(args.client_exe, config_path, repo_root, ["upload", upload_path])
+        run_client(args.client_exe, config_path, repo_root, ["cache-mailbox"])
+        cache_list = run_client(args.client_exe, config_path, repo_root, ["list-cache"])
+        expected_blocks = math.ceil(len(payload) / config["cache"]["default_block_size"])
         server_data = json.loads(store_path.read_text(encoding="utf-8"))
-        mailbox_messages = server_data["mailboxes"].get("Archive", [])
+        mailbox_messages = server_data["mailboxes"].get(mailbox_name, [])
         uploaded_local_path = to_windows_path(upload_path.resolve())
         expected_download_path = resolve_download_path(download_root, uploaded_local_path)
 
@@ -364,7 +388,7 @@ def main():
                 raise RuntimeError(f"large synthetic record missing from cache list: {scenario['path']}")
 
         first_uid = max(item["uid"] for item in mailbox_messages)
-        run_client(args.client_exe, config_path, repo_root, ["download", "Archive", uploaded_local_path])
+        run_client(args.client_exe, config_path, repo_root, ["download", uploaded_local_path])
         if not expected_download_path.exists():
             raise RuntimeError(f"downloaded file missing at {expected_download_path}")
         if md5_file(upload_path) != md5_file(expected_download_path):
@@ -373,7 +397,7 @@ def main():
         http_server = start_http_server(args.client_exe, config_path, repo_root, f"127.0.0.1:{args.http_port}")
         wait_for_windows_http_server(args.http_port)
 
-        stream_url = build_http_stream_url(args.http_port, "Archive", uploaded_local_path)
+        stream_url = build_http_stream_url(args.http_port, mailbox_name, uploaded_local_path)
         full_http_path = work_dir / "http-full.bin"
         range_http_path = work_dir / "http-range.bin"
         full_response = http_get_bytes_via_windows(stream_url, full_http_path)
@@ -398,15 +422,15 @@ def main():
                 f"unexpected Content-Range: {range_response['headers'].get('Content-Range')} != {expected_content_range}"
             )
 
-        run_client(args.client_exe, config_path, repo_root, ["delete-uid", "Archive", str(first_uid)])
+        run_client(args.client_exe, config_path, repo_root, ["delete-uid", str(first_uid)])
         server_data = json.loads(store_path.read_text(encoding="utf-8"))
-        mailbox_messages = server_data["mailboxes"].get("Archive", [])
+        mailbox_messages = server_data["mailboxes"].get(mailbox_name, [])
         if any(item["uid"] == first_uid for item in mailbox_messages):
             raise RuntimeError(f"deleted uid {first_uid} still exists on server")
         if len(mailbox_messages) != seeded_block_total + expected_blocks - 1:
             raise RuntimeError(f"unexpected message count after delete: {len(mailbox_messages)}")
 
-        delete_cache_list = run_client(args.client_exe, config_path, repo_root, ["list-cache", "Archive"])
+        delete_cache_list = run_client(args.client_exe, config_path, repo_root, ["list-cache"])
         if uploaded_local_path in delete_cache_list.stdout:
             raise RuntimeError("deleted file still appears in local cache list")
         for scenario in large_file_scenarios:
@@ -419,7 +443,7 @@ def main():
                 args.client_exe,
                 config_path,
                 repo_root,
-                ["download", "Archive", uploaded_local_path],
+                ["download", uploaded_local_path],
             )
         except RuntimeError as exc:
             download_failed = True

@@ -27,8 +27,12 @@ class TestTransport final : public mailfs::application::ports::IMailTransport {
 
   void disconnect() noexcept override {}
 
-  std::vector<std::string> list_mailboxes(const std::string&) override {
-    return {u8"\u6536\u4ef6\u7bb1"};
+  std::vector<std::string> list_mailboxes(const std::string& pattern) override {
+    list_patterns.push_back(pattern);
+    if (!listed_mailboxes.empty()) {
+      return listed_mailboxes;
+    }
+    return {u8"其他文件夹/codex测试"};
   }
 
   void select_mailbox(const std::string& mailbox) override {
@@ -66,13 +70,21 @@ class TestTransport final : public mailfs::application::ports::IMailTransport {
 
   void delete_message_by_uid(std::uint64_t) override {}
 
-  void append_message(const std::string& mailbox, const std::string& raw_message) override {
+  std::optional<std::uint64_t> append_message(const std::string& mailbox, const std::string& raw_message) override {
     appended_mailboxes.push_back(mailbox);
     appended_messages.push_back(raw_message);
+    if (!appended_uids.empty()) {
+      const auto uid = appended_uids.front();
+      appended_uids.erase(appended_uids.begin());
+      return uid;
+    }
+    return std::nullopt;
   }
 
   std::string connected_username;
   std::string connected_password;
+  std::vector<std::string> list_patterns;
+  std::vector<std::string> listed_mailboxes;
   std::vector<std::string> selected_mailboxes;
   std::vector<std::uint64_t> search_result;
   std::map<std::uint64_t, std::string> metadata_by_uid;
@@ -80,6 +92,7 @@ class TestTransport final : public mailfs::application::ports::IMailTransport {
   std::vector<std::vector<std::uint64_t>> fetch_batches;
   std::vector<std::string> appended_mailboxes;
   std::vector<std::string> appended_messages;
+  std::vector<std::uint64_t> appended_uids;
 };
 
 class TestRepository final : public mailfs::application::ports::ICacheRepository {
@@ -248,6 +261,11 @@ TEST(MailfsServiceTest, ReadsUtf8CredentialPathAndKeepsUtf8MailboxNames) {
   });
 
   TestTransport transport;
+  transport.listed_mailboxes = {
+      u8"\u5176\u4ed6\u6587\u4ef6\u5939/codex\u6d4b\u8bd5",
+      u8"\u5176\u4ed6\u6587\u4ef6\u5939/.secret",
+      u8"\u6536\u4ef6\u7bb1",
+  };
   TestRepository repository;
   mailfs::application::MailfsService service(config, transport, repository);
 
@@ -256,8 +274,10 @@ TEST(MailfsServiceTest, ReadsUtf8CredentialPathAndKeepsUtf8MailboxNames) {
   EXPECT_TRUE(repository.initialized);
   EXPECT_EQ(transport.connected_username, "user@example.com");
   EXPECT_EQ(transport.connected_password, "s3cret");
+  ASSERT_EQ(transport.list_patterns.size(), 1u);
+  EXPECT_EQ(transport.list_patterns.front(), u8"\u5176\u4ed6\u6587\u4ef6\u5939/%");
   ASSERT_EQ(mailboxes.size(), 1u);
-  EXPECT_EQ(mailboxes.front(), u8"\u6536\u4ef6\u7bb1");
+  EXPECT_EQ(mailboxes.front(), u8"\u5176\u4ed6\u6587\u4ef6\u5939/codex\u6d4b\u8bd5");
 
   std::filesystem::remove(credential_path);
   mailfs::infra::logging::Logger::instance().reset_for_tests();
@@ -608,6 +628,152 @@ TEST(MailfsServiceTest, UploadUsesConfiguredOwnerAndAbsoluteLocalPathInMetadata)
   std::filesystem::remove(upload_dir);
   std::filesystem::remove(credential_path);
   mailfs::infra::logging::Logger::instance().reset_for_tests();
+}
+
+TEST(MailfsServiceTest, UploadCachesReturnedAppendUidImmediately) {
+  const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_upload_cache_uid.txt";
+  {
+    std::ofstream output(credential_path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "user@example.com\n";
+    output << "s3cret\n";
+  }
+
+  const auto upload_dir = std::filesystem::temp_directory_path() / "mailfs_upload_cache_uid_dir";
+  std::filesystem::create_directories(upload_dir);
+  const auto local_file = upload_dir / "demo.bin";
+  {
+    std::ofstream output(local_file, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "0123456789abcdef";
+  }
+
+  mailfs::core::model::AppConfig config;
+  config.credential_file = credential_path.u8string();
+  config.default_block_size = 8;
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+  mailfs::infra::logging::Logger::instance().configure({
+      mailfs::infra::logging::LogLevel::kOff,
+      {},
+      false,
+  });
+
+  TestTransport transport;
+  transport.appended_uids = {501, 502};
+  TestRepository repository;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  service.upload_file("Archive", local_file);
+
+  ASSERT_EQ(repository.upserts.size(), 2u);
+  EXPECT_EQ(repository.upserts[0].first, 501u);
+  EXPECT_EQ(repository.upserts[0].second.block_seq, 1);
+  EXPECT_EQ(repository.upserts[1].first, 502u);
+  EXPECT_EQ(repository.upserts[1].second.block_seq, 2);
+  EXPECT_EQ(repository.upserts[0].second.local_path, std::filesystem::absolute(local_file).lexically_normal().u8string());
+
+  std::filesystem::remove(local_file);
+  std::filesystem::remove(upload_dir);
+  std::filesystem::remove(credential_path);
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+}
+
+TEST(MailfsServiceTest, UploadWithoutAppendUidDoesNotRefreshMailboxCacheInternally) {
+  const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_upload_no_appenduid.txt";
+  {
+    std::ofstream output(credential_path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "user@example.com\n";
+    output << "s3cret\n";
+  }
+
+  const auto upload_dir = std::filesystem::temp_directory_path() / "mailfs_upload_no_appenduid_dir";
+  std::filesystem::create_directories(upload_dir);
+  const auto local_file = upload_dir / "demo.bin";
+  {
+    std::ofstream output(local_file, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "0123456789abcdef";
+  }
+
+  mailfs::core::model::AppConfig config;
+  config.credential_file = credential_path.u8string();
+  config.default_block_size = 8;
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+  mailfs::infra::logging::Logger::instance().configure({
+      mailfs::infra::logging::LogLevel::kOff,
+      {},
+      false,
+  });
+
+  TestTransport transport;
+  transport.search_result = {9001, 9002};
+  transport.metadata_by_uid.emplace(9001, "subject:demo.bin/plain/1-2\r\nlocalpath:/demo.bin\r\nmailfolder:Archive\r\n");
+  transport.metadata_by_uid.emplace(9002, "subject:demo.bin/plain/2-2\r\nlocalpath:/demo.bin\r\nmailfolder:Archive\r\n");
+  TestRepository repository;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  service.upload_file("Archive", local_file);
+
+  EXPECT_TRUE(transport.fetch_batches.empty());
+  EXPECT_TRUE(repository.upserts.empty());
+
+  std::filesystem::remove(local_file);
+  std::filesystem::remove(upload_dir);
+  std::filesystem::remove(credential_path);
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+}
+
+TEST(MailfsServiceTest, UploadPathRecursesAndSkipsIgnoredExtensions) {
+  const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_upload_path.txt";
+  {
+    std::ofstream output(credential_path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "user@example.com\n";
+    output << "s3cret\n";
+  }
+
+  const auto upload_root = std::filesystem::temp_directory_path() / "mailfs_upload_path_dir";
+  const auto nested_dir = upload_root / "nested";
+  std::filesystem::create_directories(nested_dir);
+  const auto keep1 = upload_root / "a.txt";
+  const auto keep2 = nested_dir / "b.bin";
+  const auto skip = nested_dir / "c.tmp";
+  {
+    std::ofstream output(keep1, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "file-a";
+  }
+  {
+    std::ofstream output(keep2, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "file-b";
+  }
+  {
+    std::ofstream output(skip, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "file-c";
+  }
+
+  mailfs::core::model::AppConfig config;
+  config.credential_file = credential_path.u8string();
+  config.ignore_extensions = {".tmp"};
+  TestTransport transport;
+  transport.appended_uids = {601, 602};
+  TestRepository repository;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  const auto uploaded_files = service.upload_path("Archive", upload_root);
+
+  EXPECT_EQ(uploaded_files, 2u);
+  ASSERT_EQ(transport.appended_mailboxes.size(), 2u);
+  EXPECT_EQ(repository.upserts.size(), 2u);
+
+  std::filesystem::remove(keep1);
+  std::filesystem::remove(keep2);
+  std::filesystem::remove(skip);
+  std::filesystem::remove_all(upload_root);
+  std::filesystem::remove(credential_path);
 }
 
 TEST(MailfsServiceTest, ListCacheAndDownloadUseProgressCallbacksAndDerivedSavePath) {

@@ -18,9 +18,11 @@ struct AppConfig {
   std::string log_level = "info";
   std::string log_file = "mailfs.log";
   bool log_to_stderr = true;
+  std::size_t log_max_file_size = 10u * 1024u * 1024u;
+  int log_max_files = 5;
   std::string email_name = "mailfs";
   std::string owner_name = "sunshine";
-  std::string mailbox_prefix = "*";
+  std::string default_mailbox;
   std::string download_dir = "downloads";
   std::string http_listen_addr = ":9888";
   std::string http_copy_addr = "http://127.0.0.1:9888";

@@ -1,30 +1,48 @@
 {
-  "imap_server": "imap.qq.com:993",
-  "credential_file": "passwd.txt",
-  "ca_cert_file": "",
-  "log_level": "info",
-  "log_file": "logs/mailfs.log",
-  "log_to_stderr": true,
-  "email_name": "mailfs",
-  "owner_name": "sunshine",
-  "mailbox_prefix": "*",
-  "download_dir": "downloads",
-  "http_listen_addr": ":9888",
-  "http_copy_addr": "http://127.0.0.1:9888",
-  "database_path": "mailfs_cache.db",
-  "default_block_size": 33554432,
-  "cache_fetch_batch_size": 32,
-  "block_sizes": {
-    ".mp4": 5242880,
-    ".mkv": 5242880
+  "imap": {
+    "server": "imap.qq.com:993",
+    "credential_file": "passwd.txt",
+    "ca_cert_file": "",
+    "allow_insecure_tls": true
   },
-  "allowed_folders": [],
-  "ignore_extensions": [
-    ".ds_store",
-    ".thumbs.db",
-    ".tmp",
-    ".bak",
-    ".log"
-  ],
-  "allow_insecure_tls": true
+  "logging": {
+    "level": "info",
+    "file": "logs/mailfs.log",
+    "to_stderr": true,
+    "max_file_size": 10485760,
+    "max_files": 5
+  },
+  "identity": {
+    "email_name": "mailfs",
+    "owner_name": "sunshine"
+  },
+  "mailbox": {
+    "default": "其他文件夹/codex测试",
+    "allowed_folders": []
+  },
+  "storage": {
+    "download_dir": "downloads",
+    "database_path": "mailfs_cache.db"
+  },
+  "http": {
+    "listen_addr": ":9888",
+    "copy_addr": "http://127.0.0.1:9888"
+  },
+  "cache": {
+    "default_block_size": 33554432,
+    "fetch_batch_size": 32,
+    "block_sizes": {
+      ".mp4": 5242880,
+      ".mkv": 5242880
+    }
+  },
+  "upload": {
+    "ignore_extensions": [
+      ".ds_store",
+      ".thumbs.db",
+      ".tmp",
+      ".bak",
+      ".log"
+    ]
+  }
 }

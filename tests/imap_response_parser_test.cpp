@@ -12,6 +12,11 @@ TEST(ImapResponseParserTest, ParsesLiteralAndTaggedStatus) {
   ASSERT_TRUE(status.has_value());
   EXPECT_EQ(status->status, "OK");
   EXPECT_EQ(status->text, "SELECT completed");
+
+  const auto append_uid =
+      mailfs::infra::imap::ImapResponseParser::parse_append_uid("[APPENDUID 38505 3955] APPEND completed");
+  ASSERT_TRUE(append_uid.has_value());
+  EXPECT_EQ(*append_uid, 3955u);
 }
 
 TEST(ImapResponseParserTest, ParsesListSearchAndFetchLines) {

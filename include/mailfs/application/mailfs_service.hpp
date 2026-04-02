@@ -45,6 +45,9 @@ class MailfsService {
                                                                ListProgressCallback progress = {});
   void delete_message_uid(const std::string& mailbox, std::uint64_t uid);
   void upload_file(const std::string& mailbox, const std::filesystem::path& local_file, BlockProgressCallback progress = {});
+  std::size_t upload_path(const std::string& mailbox,
+                          const std::filesystem::path& local_path,
+                          BlockProgressCallback progress = {});
   std::filesystem::path download_file(const std::string& mailbox,
                                       const std::string& local_path,
                                       BlockProgressCallback progress = {});

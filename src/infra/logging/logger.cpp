@@ -86,8 +86,12 @@ void Logger::configure(LoggerConfig config) {
       std::filesystem::create_directories(config.file_path.parent_path());
     }
 
-    auto appender = log4cplus::SharedAppenderPtr(
-        new log4cplus::FileAppender(to_tstring(config.file_path.u8string()), std::ios_base::app, true, true));
+    auto appender = log4cplus::SharedAppenderPtr(new log4cplus::RollingFileAppender(
+        to_tstring(config.file_path.u8string()),
+        static_cast<long>(config.max_file_size),
+        std::max(0, config.max_backup_files),
+        true,
+        true));
     appender->setName(LOG4CPLUS_TEXT("mailfs.file"));
     appender->setLayout(std::make_unique<log4cplus::PatternLayout>(pattern));
     root.addAppender(appender);

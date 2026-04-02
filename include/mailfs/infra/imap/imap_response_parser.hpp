@@ -30,6 +30,7 @@ class ImapResponseParser {
                                                                 const std::string& literal_mailbox = {});
   static std::vector<std::uint64_t> parse_search_uids(std::string_view line);
   static std::optional<std::uint64_t> parse_fetch_uid(std::string_view line);
+  static std::optional<std::uint64_t> parse_append_uid(std::string_view text);
 };
 
 }  // namespace mailfs::infra::imap

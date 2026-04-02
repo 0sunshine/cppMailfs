@@ -172,7 +172,7 @@ void ImapClient::delete_message_by_uid(std::uint64_t uid) {
   ensure_ok(execute("EXPUNGE"), "EXPUNGE");
 }
 
-void ImapClient::append_message(const std::string& mailbox, const std::string& raw_message) {
+std::optional<std::uint64_t> ImapClient::append_message(const std::string& mailbox, const std::string& raw_message) {
   std::string payload = raw_message;
   if (payload.size() < 2 || payload.substr(payload.size() - 2) != "\r\n") {
     payload += "\r\n";
@@ -184,6 +184,7 @@ void ImapClient::append_message(const std::string& mailbox, const std::string& r
     socket_.send_all(payload);
   });
   ensure_ok(response, "APPEND");
+  return ImapResponseParser::parse_append_uid(response.text);
 }
 
 std::string ImapClient::next_tag() {

@@ -21,6 +21,8 @@ namespace mailfs::application {
 
 namespace {
 
+constexpr std::string_view kOtherFilesMailboxRoot = u8"其他文件夹";
+
 std::string trim_crlf(std::string text) {
   while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) {
     text.pop_back();
@@ -215,6 +217,34 @@ std::vector<unsigned char> read_block(std::ifstream& input, std::size_t max_byte
   input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(max_bytes));
   data.resize(static_cast<std::size_t>(input.gcount()));
   return data;
+}
+
+std::vector<std::filesystem::path> collect_upload_files(const std::filesystem::path& local_path,
+                                                        const core::model::AppConfig& config) {
+  std::vector<std::filesystem::path> files;
+  if (std::filesystem::is_regular_file(local_path)) {
+    if (!config.should_ignore_file(local_path)) {
+      files.push_back(local_path);
+    }
+    return files;
+  }
+
+  if (!std::filesystem::is_directory(local_path)) {
+    throw std::runtime_error("local path is neither a file nor a directory: " + local_path.u8string());
+  }
+
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(local_path)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    if (config.should_ignore_file(entry.path())) {
+      continue;
+    }
+    files.push_back(entry.path());
+  }
+
+  std::sort(files.begin(), files.end());
+  return files;
 }
 
 std::string normalize_slashes(std::string text) {
@@ -425,15 +455,23 @@ void MailfsService::disconnect() noexcept {
 
 std::vector<std::string> MailfsService::list_mailboxes() {
   ensure_connected();
-  infra::logging::log_debug("service", "listing mailboxes with prefix " + config_.mailbox_prefix);
-  auto mailboxes = transport_.list_mailboxes(config_.mailbox_prefix.empty() ? "*" : config_.mailbox_prefix);
+  const auto list_pattern = std::string(kOtherFilesMailboxRoot) + "/%";
+  infra::logging::log_debug("service", "listing mailboxes under " + std::string(kOtherFilesMailboxRoot));
+  auto mailboxes = transport_.list_mailboxes(list_pattern);
 
   std::vector<std::string> filtered;
   for (const auto& mailbox : mailboxes) {
+    if (!starts_with(mailbox, std::string(kOtherFilesMailboxRoot) + "/")) {
+      continue;
+    }
+    if (core::security::should_encrypt_mailbox(mailbox)) {
+      continue;
+    }
     if (config_.is_allowed_mailbox(mailbox)) {
       filtered.push_back(mailbox);
     }
   }
+  std::sort(filtered.begin(), filtered.end());
   return filtered;
 }
 
@@ -646,7 +684,11 @@ void MailfsService::upload_file(const std::string& mailbox,
     metadata.block_count = block_count;
     metadata.encrypted = encrypted;
 
-    transport_.append_message(mailbox, build_message(metadata, username_, config_.email_name, attachment_name, payload));
+    const auto appended_uid =
+        transport_.append_message(mailbox, build_message(metadata, username_, config_.email_name, attachment_name, payload));
+    if (appended_uid.has_value()) {
+      repository_.upsert_mail_block(*appended_uid, metadata);
+    }
     if (progress) {
       progress(block_seq, block_count, local_file.filename().u8string());
     }
@@ -654,6 +696,20 @@ void MailfsService::upload_file(const std::string& mailbox,
 
   infra::logging::log_info("service",
                            "upload complete for " + local_file.u8string() + ", blocks=" + std::to_string(block_count));
+}
+
+std::size_t MailfsService::upload_path(const std::string& mailbox,
+                                       const std::filesystem::path& local_path,
+                                       BlockProgressCallback progress) {
+  const auto files = collect_upload_files(local_path, config_);
+  if (files.empty()) {
+    throw std::runtime_error("no uploadable files found under path: " + local_path.u8string());
+  }
+
+  for (const auto& file : files) {
+    upload_file(mailbox, file, progress);
+  }
+  return files.size();
 }
 
 std::filesystem::path MailfsService::download_file(const std::string& mailbox,

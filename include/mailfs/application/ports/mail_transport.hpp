@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,7 +33,8 @@ class IMailTransport {
   virtual std::vector<FetchedMetadata> fetch_metadata(const std::vector<std::uint64_t>& uids) = 0;
   virtual std::vector<FetchedMessage> fetch_messages(const std::vector<std::uint64_t>& uids) = 0;
   virtual void delete_message_by_uid(std::uint64_t uid) = 0;
-  virtual void append_message(const std::string& mailbox, const std::string& raw_message) = 0;
+  virtual std::optional<std::uint64_t> append_message(const std::string& mailbox,
+                                                      const std::string& raw_message) = 0;
 };
 
 }  // namespace mailfs::application::ports

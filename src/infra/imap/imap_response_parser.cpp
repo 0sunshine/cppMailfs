@@ -101,4 +101,13 @@ std::optional<std::uint64_t> ImapResponseParser::parse_fetch_uid(std::string_vie
   return std::stoull(match[1].str());
 }
 
+std::optional<std::uint64_t> ImapResponseParser::parse_append_uid(std::string_view text) {
+  static const std::regex pattern(R"(APPENDUID\s+\d+\s+(\d+))");
+  std::match_results<std::string_view::const_iterator> match;
+  if (!std::regex_search(text.begin(), text.end(), match, pattern)) {
+    return std::nullopt;
+  }
+  return std::stoull(match[1].str());
+}
+
 }  // namespace mailfs::infra::imap

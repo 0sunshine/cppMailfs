@@ -18,6 +18,8 @@ struct LoggerConfig {
   LogLevel level = LogLevel::kInfo;
   std::filesystem::path file_path;
   bool also_stderr = true;
+  std::size_t max_file_size = 10u * 1024u * 1024u;
+  int max_backup_files = 5;
 };
 
 class Logger {
