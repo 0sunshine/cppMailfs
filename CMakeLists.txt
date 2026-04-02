@@ -47,6 +47,7 @@ target_include_directories(sqlite3_vendor PUBLIC ${sqlite_amalgamation_SOURCE_DI
 target_compile_definitions(sqlite3_vendor PUBLIC SQLITE_ENABLE_JSON1 SQLITE_THREADSAFE=1)
 
 add_library(mailfs_core
+  src/application/http_imap_download_server.cpp
   src/application/mailfs_service.cpp
   src/core/app_config.cpp
   src/core/hash.cpp
@@ -78,6 +79,10 @@ target_link_libraries(mailfs_core
     sqlite3_vendor
 )
 
+if(WIN32)
+  target_link_libraries(mailfs_core PUBLIC ws2_32)
+endif()
+
 if(MSVC)
   target_compile_options(mailfs_core PRIVATE /W4 /utf-8)
 else()
@@ -103,6 +108,7 @@ if(MAILFS_BUILD_TESTS)
 
   add_executable(mailfs_tests
     tests/config_loader_test.cpp
+    tests/http_imap_download_server_test.cpp
     tests/imap_response_parser_test.cpp
     tests/imap_utf7_test.cpp
     tests/logger_test.cpp

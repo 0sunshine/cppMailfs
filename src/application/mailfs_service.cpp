@@ -472,24 +472,8 @@ void MailfsService::upload_file(const std::string& mailbox,
 std::filesystem::path MailfsService::download_file(const std::string& mailbox,
                                                    const std::string& local_path,
                                                    BlockProgressCallback progress) {
-  ensure_mailbox_selected(mailbox);
   infra::logging::log_info("service", "downloading " + mailbox + ":" + local_path);
-
-  auto cached = repository_.find_file(mailbox, local_path);
-  if (!cached.has_value()) {
-    cache_mailbox(mailbox);
-    cached = repository_.find_file(mailbox, local_path);
-  }
-
-  if (!cached.has_value()) {
-    throw std::runtime_error("cached file index not found for local path: " + local_path);
-  }
-
-  auto file_record = *cached;
-  file_record.sort_blocks();
-  if (file_record.blocks.size() != static_cast<std::size_t>(file_record.block_count)) {
-    throw std::runtime_error("cached file is incomplete for local path: " + local_path);
-  }
+  auto file_record = resolve_cached_file(mailbox, local_path);
 
   const auto save_path = resolve_download_path(file_record.local_path);
   const auto save_tmp_path = save_path.parent_path() / (save_path.filename().u8string() + ".tmp");
@@ -516,22 +500,7 @@ std::filesystem::path MailfsService::download_file(const std::string& mailbox,
       continue;
     }
 
-    const auto fetched_messages = transport_.fetch_messages({block.uid});
-    if (fetched_messages.empty()) {
-      throw std::runtime_error("missing downloaded block uid: " + std::to_string(block.uid));
-    }
-
-    const auto metadata = extract_metadata_from_message(fetched_messages.front().raw_message);
-    const auto payload = extract_attachment_from_message(fetched_messages.front().raw_message);
-    if (core::md5_hex(payload) != block.block_md5) {
-      throw std::runtime_error("block md5 not match for uid: " + std::to_string(block.uid));
-    }
-    if (normalize_slashes(metadata.mail_folder) != normalize_slashes(file_record.mail_folder)) {
-      throw std::runtime_error("mailfolder not match for uid: " + std::to_string(block.uid));
-    }
-    if (normalize_slashes(metadata.local_path) != normalize_slashes(file_record.local_path)) {
-      throw std::runtime_error("localpath not match for uid: " + std::to_string(block.uid));
-    }
+    const auto downloaded = fetch_cached_block(mailbox, file_record, block);
 
     const auto tmp_block_path = cache_block_path.parent_path() / std::filesystem::u8path(cache_block_path.filename().u8string() + ".tmp");
     {
@@ -539,7 +508,8 @@ std::filesystem::path MailfsService::download_file(const std::string& mailbox,
       if (!tmp_block) {
         throw std::runtime_error("failed to open temp block file: " + tmp_block_path.u8string());
       }
-      tmp_block.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+      tmp_block.write(reinterpret_cast<const char*>(downloaded.payload.data()),
+                      static_cast<std::streamsize>(downloaded.payload.size()));
     }
     std::filesystem::rename(tmp_block_path, cache_block_path);
 
@@ -572,6 +542,51 @@ std::filesystem::path MailfsService::download_file(const std::string& mailbox,
   infra::logging::log_info("service",
                            "download complete for " + local_path + ", blocks=" + std::to_string(file_record.block_count));
   return save_path;
+}
+
+core::model::CachedFileRecord MailfsService::resolve_cached_file(const std::string& mailbox,
+                                                                 const std::string& local_path) {
+  auto cached = repository_.find_file(mailbox, local_path);
+  if (!cached.has_value()) {
+    cache_mailbox(mailbox);
+    cached = repository_.find_file(mailbox, local_path);
+  }
+
+  if (!cached.has_value()) {
+    throw std::runtime_error("cached file index not found for local path: " + local_path);
+  }
+
+  auto file_record = *cached;
+  file_record.sort_blocks();
+  if (file_record.blocks.size() != static_cast<std::size_t>(file_record.block_count)) {
+    throw std::runtime_error("cached file is incomplete for local path: " + local_path);
+  }
+  return file_record;
+}
+
+DownloadedBlockData MailfsService::fetch_cached_block(const std::string& mailbox,
+                                                      const core::model::CachedFileRecord& file_record,
+                                                      const core::model::CachedBlockRecord& block) {
+  ensure_mailbox_selected(mailbox);
+
+  const auto fetched_messages = transport_.fetch_messages({block.uid});
+  if (fetched_messages.empty()) {
+    throw std::runtime_error("missing downloaded block uid: " + std::to_string(block.uid));
+  }
+
+  auto metadata = extract_metadata_from_message(fetched_messages.front().raw_message);
+  auto payload = extract_attachment_from_message(fetched_messages.front().raw_message);
+  if (core::md5_hex(payload) != block.block_md5) {
+    throw std::runtime_error("block md5 not match for uid: " + std::to_string(block.uid));
+  }
+  if (normalize_slashes(metadata.mail_folder) != normalize_slashes(file_record.mail_folder)) {
+    throw std::runtime_error("mailfolder not match for uid: " + std::to_string(block.uid));
+  }
+  if (normalize_slashes(metadata.local_path) != normalize_slashes(file_record.local_path)) {
+    throw std::runtime_error("localpath not match for uid: " + std::to_string(block.uid));
+  }
+
+  return {std::move(metadata), std::move(payload)};
 }
 
 void MailfsService::ensure_connected() {

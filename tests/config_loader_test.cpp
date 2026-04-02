@@ -17,6 +17,8 @@ TEST(JsonConfigLoaderTest, LoadsOverridesAndNormalizesExtensions) {
     "log_to_stderr": false,
     "owner_name": "sunshine",
     "download_dir": "downloads-root",
+    "http_listen_addr": ":8765",
+    "http_copy_addr": "http://127.0.0.1:8765",
     "database_path": "cache.db",
     "default_block_size": 4096,
     "block_sizes": {".MP4": 8192},
@@ -34,6 +36,8 @@ TEST(JsonConfigLoaderTest, LoadsOverridesAndNormalizesExtensions) {
   EXPECT_FALSE(config.log_to_stderr);
   EXPECT_EQ(config.owner_name, "sunshine");
   EXPECT_EQ(config.download_dir, "downloads-root");
+  EXPECT_EQ(config.http_listen_addr, ":8765");
+  EXPECT_EQ(config.http_copy_addr, "http://127.0.0.1:8765");
   EXPECT_EQ(config.database_path, "cache.db");
   EXPECT_EQ(config.default_block_size, 4096u);
   ASSERT_TRUE(config.block_sizes.count(".mp4"));

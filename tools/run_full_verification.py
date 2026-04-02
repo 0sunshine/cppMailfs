@@ -92,8 +92,9 @@ flowchart LR
 2. Run all unit tests through `ctest`.
 3. Start a local TLS IMAP test server in WSL.
 4. Upload a real file, cache mailbox metadata, download the file, and verify MD5.
-5. Seed multiple synthetic large-file records around 1GB and validate cache/list behavior.
-6. Delete one message by UID and verify server-side removal, local cache cleanup, and incomplete download rejection.
+5. Start the CLI HTTP-to-IMAP service and validate both full-file streaming and HTTP Range responses.
+6. Seed multiple synthetic large-file records around 1GB and validate cache/list behavior.
+7. Delete one message by UID and verify server-side removal, local cache cleanup, and incomplete download rejection.
 
 ## Test Matrix
 
@@ -102,6 +103,8 @@ flowchart LR
 | Build | NMake compile | `mailfs_cli.exe` and `mailfs_tests.exe` generated | {"PASS" if build_result["returncode"] == 0 else "FAIL"} |
 | Unit | gtest / ctest suite | All unit tests pass | {"PASS" if ctest_result["returncode"] == 0 else "FAIL"} |
 | E2E | Small file upload/cache/download | MD5 matches | {"PASS" if e2e_result["returncode"] == 0 else "FAIL"} |
+| E2E | HTTP-to-IMAP full download | Streamed bytes match uploaded file | {"PASS" if e2e_result["returncode"] == 0 else "FAIL"} |
+| E2E | HTTP-to-IMAP range download | Returned slice and `Content-Range` are correct | {"PASS" if e2e_result["returncode"] == 0 else "FAIL"} |
 | E2E | Synthetic 1GB-class cache records | Listed and indexed correctly | {"PASS" if e2e_result["returncode"] == 0 else "FAIL"} |
 | E2E | Delete by UID | Server record removed and local cache cleared | {"PASS" if e2e_result["returncode"] == 0 else "FAIL"} |
 
@@ -139,6 +142,7 @@ flowchart LR
 
 - The CLI build path under VS2022 + NMake is working.
 - Unit tests cover config parsing, IMAP parsing, MIME round-trip, metadata, SQLite cache, delete-by-UID cache cleanup, and large-file metadata persistence.
+- End-to-end validation now also covers the CLI-started HTTP-to-IMAP service, including both whole-file streaming and Range reads.
 - End-to-end validation covers real content transfer for a small file and synthetic 1GB-class indexing scenarios for scalability-oriented checks.
 """
 

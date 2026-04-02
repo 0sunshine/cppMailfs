@@ -22,6 +22,8 @@ struct AppConfig {
   std::string owner_name = "sunshine";
   std::string mailbox_prefix = "*";
   std::string download_dir = "downloads";
+  std::string http_listen_addr = ":9888";
+  std::string http_copy_addr = "http://127.0.0.1:9888";
   std::string database_path = "mailfs_cache.db";
   std::size_t default_block_size = 512u * 65536u;
   std::size_t cache_fetch_batch_size = 32;

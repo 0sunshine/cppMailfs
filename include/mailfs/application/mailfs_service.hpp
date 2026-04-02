@@ -19,6 +19,11 @@ using BlockProgressCallback = std::function<void(std::int64_t current_block,
                                                  std::int64_t total_blocks,
                                                  const std::string& file_name)>;
 
+struct DownloadedBlockData {
+  core::model::MailBlockMetadata metadata;
+  std::vector<unsigned char> payload;
+};
+
 class MailfsService {
  public:
   MailfsService(core::model::AppConfig config,
@@ -36,6 +41,10 @@ class MailfsService {
   std::filesystem::path download_file(const std::string& mailbox,
                                       const std::string& local_path,
                                       BlockProgressCallback progress = {});
+  core::model::CachedFileRecord resolve_cached_file(const std::string& mailbox, const std::string& local_path);
+  DownloadedBlockData fetch_cached_block(const std::string& mailbox,
+                                         const core::model::CachedFileRecord& file_record,
+                                         const core::model::CachedBlockRecord& block);
 
  private:
   core::model::AppConfig config_;

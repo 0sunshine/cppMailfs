@@ -9,6 +9,8 @@
   "owner_name": "sunshine",
   "mailbox_prefix": "*",
   "download_dir": "downloads",
+  "http_listen_addr": ":9888",
+  "http_copy_addr": "http://127.0.0.1:9888",
   "database_path": "mailfs_cache.db",
   "default_block_size": 33554432,
   "cache_fetch_batch_size": 32,

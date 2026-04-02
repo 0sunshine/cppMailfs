@@ -89,6 +89,31 @@ def parse_quoted_strings(text: str):
     return re.findall(r'"((?:[^"\\]|\\.)*)"', text)
 
 
+def extract_boundary(raw_message: str) -> str | None:
+    header_text, _, _ = raw_message.partition("\r\n\r\n")
+    match = re.search(r'boundary="([^"]+)"', header_text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def extract_first_mime_part_body(raw_message: str) -> str:
+    boundary = extract_boundary(raw_message)
+    if not boundary:
+        return raw_message
+
+    marker = f"--{boundary}"
+    sections = raw_message.split(marker)
+    for section in sections[1:]:
+        if section.startswith("--"):
+            break
+        section = section.lstrip("\r\n")
+        _, _, body = section.partition("\r\n\r\n")
+        if body:
+            return body.rstrip("\r\n")
+    return raw_message
+
+
 class ImapHandler(socketserver.StreamRequestHandler):
     def setup(self):
         super().setup()
@@ -151,8 +176,15 @@ class ImapHandler(socketserver.StreamRequestHandler):
                     continue
                 uid_list_text = arguments.split(" ", 2)[1]
                 requested_uids = [int(item) for item in uid_list_text.split(",") if item]
+                fetch_target = arguments.upper()
+                want_metadata_only = "BODY.PEEK[1]" in fetch_target or "BODY[1]" in fetch_target
                 for seq, item in enumerate(self.server.store.fetch_messages(self.selected_mailbox, requested_uids), start=1):
-                    payload = item["raw_message"].encode("utf-8")
+                    raw_payload = (
+                        extract_first_mime_part_body(item["raw_message"])
+                        if want_metadata_only
+                        else item["raw_message"]
+                    )
+                    payload = raw_payload.encode("utf-8")
                     self.wfile.write(
                         f"* {seq} FETCH (UID {item['uid']} BODY[] {{{len(payload)}}}\r\n".encode("utf-8")
                     )

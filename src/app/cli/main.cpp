@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "mailfs/application/http_imap_download_server.hpp"
 #include "mailfs/application/mailfs_service.hpp"
 #include "mailfs/infra/config/json_config_loader.hpp"
 #include "mailfs/infra/imap/imap_client.hpp"
@@ -21,7 +22,8 @@ void print_usage() {
       << "  mailfs_cli [--config path] list-cache <mailbox>\n"
       << "  mailfs_cli [--config path] delete-uid <mailbox> <uid>\n"
       << "  mailfs_cli [--config path] upload <mailbox> <local-file>\n"
-      << "  mailfs_cli [--config path] download <mailbox> <local-path>\n";
+      << "  mailfs_cli [--config path] download <mailbox> <local-path>\n"
+      << "  mailfs_cli [--config path] serve-http [--listen addr]\n";
 }
 
 void print_count_progress(const std::string& label, std::size_t done, std::size_t total) {
@@ -142,6 +144,20 @@ int run_cli(std::vector<std::string> args) {
         print_block_progress("download", current_block, total_blocks, file_name);
       });
       std::cout << "download complete: " << output_path.u8string() << '\n';
+      return 0;
+    }
+
+    if (command == "serve-http") {
+      if (args.size() == 3 && args[1] == "--listen") {
+        config.http_listen_addr = args[2];
+      } else if (args.size() != 1) {
+        print_usage();
+        return 1;
+      }
+
+      mailfs::application::HttpImapDownloadServer server(config);
+      std::cout << "HTTP-to-IMAP server listening on " << config.http_listen_addr << '\n';
+      server.serve();
       return 0;
     }
 
