@@ -9,6 +9,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include <nlohmann/json.hpp>
+
 #include "mailfs/core/hash.hpp"
 #include "mailfs/core/mime/mime_message.hpp"
 #include "mailfs/core/model/mail_block_metadata.hpp"
@@ -220,6 +222,116 @@ std::string normalize_slashes(std::string text) {
   return text;
 }
 
+bool starts_with(const std::string& text, const std::string& prefix) {
+  return text.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), text.begin());
+}
+
+std::string normalize_path_for_compare(std::string text) {
+  text = normalize_slashes(std::move(text));
+  while (!text.empty() && text.front() == '/') {
+    text.erase(text.begin());
+  }
+  while (!text.empty() && text.back() == '/') {
+    text.pop_back();
+  }
+  return text;
+}
+
+std::string last_path_segment(std::string text) {
+  text = normalize_path_for_compare(std::move(text));
+  const auto slash = text.find_last_of('/');
+  if (slash == std::string::npos) {
+    return text;
+  }
+  return text.substr(slash + 1);
+}
+
+bool path_matches_prefix(const std::string& local_path, const std::string& prefix) {
+  const auto normalized_path = normalize_path_for_compare(local_path);
+  const auto normalized_prefix = normalize_path_for_compare(prefix);
+  if (normalized_prefix.empty()) {
+    return true;
+  }
+  if (normalized_path == normalized_prefix) {
+    return true;
+  }
+  return starts_with(normalized_path, normalized_prefix) &&
+         normalized_path.size() > normalized_prefix.size() &&
+         normalized_path[normalized_prefix.size()] == '/';
+}
+
+std::string make_playlist_relative_path(const std::string& local_path, const std::string& prefix) {
+  auto normalized_path = normalize_path_for_compare(local_path);
+  const auto normalized_prefix = normalize_path_for_compare(prefix);
+  if (normalized_prefix.empty() || !path_matches_prefix(local_path, prefix)) {
+    return normalized_path;
+  }
+  if (normalized_path == normalized_prefix) {
+    return last_path_segment(normalized_path);
+  }
+
+  normalized_path.erase(0, normalized_prefix.size());
+  while (!normalized_path.empty() && normalized_path.front() == '/') {
+    normalized_path.erase(normalized_path.begin());
+  }
+  return normalized_path.empty() ? last_path_segment(local_path) : normalized_path;
+}
+
+std::string encode_base64_url(std::string_view text) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+  std::string encoded;
+  encoded.reserve(((text.size() + 2) / 3) * 4);
+
+  for (std::size_t i = 0; i < text.size(); i += 3) {
+    const auto remaining = std::min<std::size_t>(3, text.size() - i);
+    std::uint32_t block = static_cast<unsigned char>(text[i]) << 16;
+    if (remaining > 1) {
+      block |= static_cast<std::uint32_t>(static_cast<unsigned char>(text[i + 1])) << 8;
+    }
+    if (remaining > 2) {
+      block |= static_cast<std::uint32_t>(static_cast<unsigned char>(text[i + 2]));
+    }
+
+    encoded.push_back(kAlphabet[(block >> 18) & 0x3F]);
+    encoded.push_back(kAlphabet[(block >> 12) & 0x3F]);
+    encoded.push_back(remaining > 1 ? kAlphabet[(block >> 6) & 0x3F] : '=');
+    encoded.push_back(remaining > 2 ? kAlphabet[block & 0x3F] : '=');
+  }
+
+  return encoded;
+}
+
+std::string trim_trailing_slashes(std::string text) {
+  while (!text.empty() && text.back() == '/') {
+    text.pop_back();
+  }
+  return text;
+}
+
+std::string build_http_stream_url(const std::string& http_copy_addr,
+                                  const std::string& mailbox,
+                                  const std::string& local_path) {
+  return trim_trailing_slashes(http_copy_addr) + "/httptoimap?imapdir=" + encode_base64_url(mailbox) +
+         "&localpath=" + encode_base64_url(local_path);
+}
+
+bool has_complete_blocks(core::model::CachedFileRecord file_record) {
+  file_record.sort_blocks();
+  if (file_record.block_count <= 0 || file_record.blocks.size() != static_cast<std::size_t>(file_record.block_count)) {
+    return false;
+  }
+
+  for (std::int32_t expected_seq = 1; expected_seq <= file_record.block_count; ++expected_seq) {
+    const auto& block = file_record.blocks[static_cast<std::size_t>(expected_seq - 1)];
+    if (block.block_seq != expected_seq || block.uid == 0 || block.block_md5.empty()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 core::model::MailBlockMetadata extract_metadata_from_message(const std::string& raw_message) {
   const auto message = core::mime::MimeMessage::parse(raw_message);
   for (const auto& part : message.parts) {
@@ -405,6 +517,81 @@ std::vector<core::model::CachedFileRecord> MailfsService::list_cached_files(cons
     }
   }
   return files;
+}
+
+std::vector<IntegrityCheckResult> MailfsService::check_cached_integrity(const std::string& mailbox,
+                                                                        const std::string& local_path_prefix) {
+  auto files = repository_.list_files(mailbox);
+  std::vector<IntegrityCheckResult> results;
+  results.reserve(files.size());
+
+  for (auto& file : files) {
+    if (!path_matches_prefix(file.local_path, local_path_prefix)) {
+      continue;
+    }
+
+    file.sort_blocks();
+    IntegrityCheckResult result;
+    result.cached_blocks = static_cast<std::int64_t>(file.blocks.size());
+    result.expected_blocks = file.block_count;
+    result.ok = has_complete_blocks(file);
+    result.file = std::move(file);
+    results.push_back(std::move(result));
+  }
+
+  return results;
+}
+
+std::string MailfsService::export_playlist_json(const std::string& mailbox, const std::string& local_path_prefix) {
+  const auto files = repository_.list_files(mailbox);
+  nlohmann::json root = nlohmann::json::object();
+
+  for (const auto& file : files) {
+    if (!path_matches_prefix(file.local_path, local_path_prefix)) {
+      continue;
+    }
+
+    const auto relative_path = make_playlist_relative_path(file.local_path, local_path_prefix);
+    if (relative_path.empty()) {
+      continue;
+    }
+
+    auto* node = &root;
+    std::stringstream path_stream(relative_path);
+    std::string segment;
+    std::vector<std::string> parts;
+    while (std::getline(path_stream, segment, '/')) {
+      if (!segment.empty()) {
+        parts.push_back(segment);
+      }
+    }
+    if (parts.empty()) {
+      continue;
+    }
+
+    bool path_conflicted = false;
+    for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+      auto& child = (*node)[parts[i]];
+      if (child.is_null()) {
+        child = nlohmann::json::object();
+      } else if (!child.is_object()) {
+        path_conflicted = true;
+        break;
+      }
+      node = &child;
+    }
+    if (path_conflicted) {
+      continue;
+    }
+
+    auto& leaf = (*node)[parts.back()];
+    if (leaf.is_object()) {
+      continue;
+    }
+    leaf = build_http_stream_url(config_.http_copy_addr, mailbox, file.local_path);
+  }
+
+  return root.dump(2);
 }
 
 void MailfsService::delete_message_uid(const std::string& mailbox, std::uint64_t uid) {

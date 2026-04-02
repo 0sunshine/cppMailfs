@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -14,13 +16,29 @@
 
 namespace {
 
+std::string normalize_slashes(std::string text) {
+  std::replace(text.begin(), text.end(), '\\', '/');
+  return text;
+}
+
+std::string last_segment(std::string text) {
+  text = normalize_slashes(std::move(text));
+  while (!text.empty() && text.back() == '/') {
+    text.pop_back();
+  }
+  const auto slash = text.find_last_of('/');
+  return slash == std::string::npos ? text : text.substr(slash + 1);
+}
+
 void print_usage() {
   std::cout
       << "Usage:\n"
       << "  mailfs_cli [--config path] list-mailboxes\n"
       << "  mailfs_cli [--config path] cache-mailbox <mailbox>\n"
       << "  mailfs_cli [--config path] list-cache <mailbox>\n"
+      << "  mailfs_cli [--config path] check-integrity <mailbox> [local-path-prefix]\n"
       << "  mailfs_cli [--config path] delete-uid <mailbox> <uid>\n"
+      << "  mailfs_cli [--config path] export-playlist <mailbox> [output-json] [local-path-prefix]\n"
       << "  mailfs_cli [--config path] upload <mailbox> <local-file>\n"
       << "  mailfs_cli [--config path] download <mailbox> <local-path>\n"
       << "  mailfs_cli [--config path] serve-http [--listen addr]\n";
@@ -109,6 +127,28 @@ int run_cli(std::vector<std::string> args) {
       return 0;
     }
 
+    if (command == "check-integrity") {
+      if (args.size() != 2 && args.size() != 3) {
+        print_usage();
+        return 1;
+      }
+      const auto prefix = args.size() == 3 ? args[2] : std::string();
+      const auto results = service.check_cached_integrity(args[1], prefix);
+      std::size_t ok_count = 0;
+      std::size_t broken_count = 0;
+      for (const auto& result : results) {
+        if (result.ok) {
+          ++ok_count;
+          continue;
+        }
+        ++broken_count;
+        std::cout << "BROKEN " << result.file.local_path << " cached=" << result.cached_blocks
+                  << " expected=" << result.expected_blocks << '\n';
+      }
+      std::cout << "integrity ok=" << ok_count << " broken=" << broken_count << " total=" << results.size() << '\n';
+      return 0;
+    }
+
     if (command == "upload") {
       if (args.size() != 3) {
         print_usage();
@@ -144,6 +184,33 @@ int run_cli(std::vector<std::string> args) {
         print_block_progress("download", current_block, total_blocks, file_name);
       });
       std::cout << "download complete: " << output_path.u8string() << '\n';
+      return 0;
+    }
+
+    if (command == "export-playlist") {
+      if (args.size() < 2 || args.size() > 4) {
+        print_usage();
+        return 1;
+      }
+
+      const auto mailbox = args[1];
+      const auto output_path =
+          args.size() >= 3 ? std::filesystem::u8path(args[2])
+                           : std::filesystem::u8path(last_segment(mailbox).empty() ? "playlist.json"
+                                                                                   : last_segment(mailbox) + "_playlist.json");
+      const auto prefix = args.size() == 4 ? args[3] : std::string();
+      const auto playlist_json = service.export_playlist_json(mailbox, prefix);
+
+      if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+      }
+      std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+      if (!output) {
+        throw std::runtime_error("failed to open output file: " + output_path.u8string());
+      }
+      output << playlist_json;
+      output.close();
+      std::cout << "playlist exported: " << output_path.u8string() << '\n';
       return 0;
     }
 

@@ -24,6 +24,13 @@ struct DownloadedBlockData {
   std::vector<unsigned char> payload;
 };
 
+struct IntegrityCheckResult {
+  core::model::CachedFileRecord file;
+  std::int64_t cached_blocks = 0;
+  std::int64_t expected_blocks = 0;
+  bool ok = false;
+};
+
 class MailfsService {
  public:
   MailfsService(core::model::AppConfig config,
@@ -41,6 +48,9 @@ class MailfsService {
   std::filesystem::path download_file(const std::string& mailbox,
                                       const std::string& local_path,
                                       BlockProgressCallback progress = {});
+  std::vector<IntegrityCheckResult> check_cached_integrity(const std::string& mailbox,
+                                                           const std::string& local_path_prefix = {});
+  std::string export_playlist_json(const std::string& mailbox, const std::string& local_path_prefix = {});
   core::model::CachedFileRecord resolve_cached_file(const std::string& mailbox, const std::string& local_path);
   DownloadedBlockData fetch_cached_block(const std::string& mailbox,
                                          const core::model::CachedFileRecord& file_record,

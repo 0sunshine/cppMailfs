@@ -1,11 +1,12 @@
 #include <filesystem>
 #include <fstream>
-#include <tuple>
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include "mailfs/application/mailfs_service.hpp"
 #include "mailfs/core/hash.hpp"
@@ -140,6 +141,65 @@ class DownloadRepository final : public mailfs::application::ports::ICacheReposi
   mailfs::core::model::CachedFileRecord file;
 };
 
+class ListingRepository final : public mailfs::application::ports::ICacheRepository {
+ public:
+  void initialize() override {}
+
+  void upsert_mail_block(std::uint64_t, const mailfs::core::model::MailBlockMetadata&) override {}
+
+  void remove_message_uid(const std::string&, std::uint64_t) override {}
+
+  std::set<std::uint64_t> get_cached_uids(const std::string&) const override {
+    return {};
+  }
+
+  std::vector<mailfs::core::model::CachedFileRecord> list_files(const std::string& mailbox) const override {
+    std::vector<mailfs::core::model::CachedFileRecord> filtered;
+    for (const auto& file : files) {
+      if (file.mail_folder == mailbox) {
+        filtered.push_back(file);
+      }
+    }
+    return filtered;
+  }
+
+  std::optional<mailfs::core::model::CachedFileRecord> find_file(const std::string& mailbox,
+                                                                 const std::string& local_path) const override {
+    for (const auto& file : files) {
+      if (file.mail_folder == mailbox && file.local_path == local_path) {
+        return file;
+      }
+    }
+    return std::nullopt;
+  }
+
+  std::vector<mailfs::core::model::CachedFileRecord> files;
+};
+
+std::string base64_url_encode(std::string_view input) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+  std::string encoded;
+  encoded.reserve(((input.size() + 2) / 3) * 4);
+  for (std::size_t i = 0; i < input.size(); i += 3) {
+    const auto remaining = std::min<std::size_t>(3, input.size() - i);
+    std::uint32_t block = static_cast<unsigned char>(input[i]) << 16;
+    if (remaining > 1) {
+      block |= static_cast<std::uint32_t>(static_cast<unsigned char>(input[i + 1])) << 8;
+    }
+    if (remaining > 2) {
+      block |= static_cast<std::uint32_t>(static_cast<unsigned char>(input[i + 2]));
+    }
+
+    encoded.push_back(kAlphabet[(block >> 18) & 0x3F]);
+    encoded.push_back(kAlphabet[(block >> 12) & 0x3F]);
+    encoded.push_back(remaining > 1 ? kAlphabet[(block >> 6) & 0x3F] : '=');
+    encoded.push_back(remaining > 2 ? kAlphabet[block & 0x3F] : '=');
+  }
+  return encoded;
+}
+
 std::string build_test_mail_message(const mailfs::core::model::MailBlockMetadata& metadata,
                                     const std::string& display_name,
                                     const std::string& email,
@@ -201,6 +261,132 @@ TEST(MailfsServiceTest, ReadsUtf8CredentialPathAndKeepsUtf8MailboxNames) {
 
   std::filesystem::remove(credential_path);
   mailfs::infra::logging::Logger::instance().reset_for_tests();
+}
+
+TEST(MailfsServiceTest, CheckIntegrityFiltersByPrefixAndDetectsSequenceGaps) {
+  const std::string mailbox =
+      "\xE5\x85\xB6\xE4\xBB\x96\xE6\x96\x87\xE4\xBB\xB6\xE5\xA4\xB9\x2F\x63\x6F\x64\x65\x78\xE6\xB5\x8B\xE8\xAF\x95";
+
+  ListingRepository repository;
+  repository.files = {
+      mailfs::core::model::CachedFileRecord{
+          1,
+          mailbox,
+          "E:/media/demo/ok.mp4",
+          2,
+          "file-ok",
+          20,
+          {
+              {1, 11, "md5-1", 10},
+              {2, 12, "md5-2", 10},
+          },
+      },
+      mailfs::core::model::CachedFileRecord{
+          2,
+          mailbox,
+          "E:/media/demo/broken.mp4",
+          2,
+          "file-broken",
+          20,
+          {
+              {1, 21, "md5-1", 10},
+              {3, 22, "md5-2", 10},
+          },
+      },
+      mailfs::core::model::CachedFileRecord{
+          3,
+          mailbox,
+          "E:/media/other/skip.mp4",
+          1,
+          "file-skip",
+          10,
+          {
+              {1, 31, "md5-1", 10},
+          },
+      },
+  };
+
+  mailfs::core::model::AppConfig config;
+  TestTransport transport;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  const auto results = service.check_cached_integrity(mailbox, "E:/media/demo");
+
+  ASSERT_EQ(results.size(), 2u);
+  EXPECT_EQ(results[0].file.local_path, "E:/media/demo/ok.mp4");
+  EXPECT_TRUE(results[0].ok);
+  EXPECT_EQ(results[0].cached_blocks, 2);
+  EXPECT_EQ(results[0].expected_blocks, 2);
+  EXPECT_EQ(results[1].file.local_path, "E:/media/demo/broken.mp4");
+  EXPECT_FALSE(results[1].ok);
+  EXPECT_EQ(results[1].cached_blocks, 2);
+  EXPECT_EQ(results[1].expected_blocks, 2);
+}
+
+TEST(MailfsServiceTest, ExportPlaylistBuildsNestedJsonFromSQLiteCachedFiles) {
+  const std::string mailbox =
+      "\xE5\x85\xB6\xE4\xBB\x96\xE6\x96\x87\xE4\xBB\xB6\xE5\xA4\xB9\x2F\x63\x6F\x64\x65\x78\xE6\xB5\x8B\xE8\xAF\x95";
+
+  ListingRepository repository;
+  repository.files = {
+      mailfs::core::model::CachedFileRecord{
+          1,
+          mailbox,
+          "E:\\media\\movies\\alpha.mp4",
+          1,
+          "file-1",
+          10,
+          {
+              {1, 11, "md5-1", 10},
+          },
+      },
+      mailfs::core::model::CachedFileRecord{
+          2,
+          mailbox,
+          "E:/media/movies/series/beta.mp4",
+          1,
+          "file-2",
+          10,
+          {
+              {1, 12, "md5-2", 10},
+          },
+      },
+      mailfs::core::model::CachedFileRecord{
+          3,
+          mailbox,
+          "E:/media/music/skip.mp3",
+          1,
+          "file-3",
+          10,
+          {
+              {1, 13, "md5-3", 10},
+          },
+      },
+  };
+
+  mailfs::core::model::AppConfig config;
+  config.http_copy_addr = "http://127.0.0.1:9888/";
+  TestTransport transport;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  const auto json_text = service.export_playlist_json(mailbox, "E:/media/movies");
+  const auto playlist = nlohmann::json::parse(json_text);
+
+  ASSERT_TRUE(playlist.is_object());
+  ASSERT_TRUE(playlist.contains("alpha.mp4"));
+  ASSERT_TRUE(playlist.contains("series"));
+  ASSERT_TRUE(playlist["series"].is_object());
+  ASSERT_TRUE(playlist["series"].contains("beta.mp4"));
+  EXPECT_FALSE(playlist.contains("skip.mp3"));
+
+  EXPECT_EQ(
+      playlist["alpha.mp4"].get<std::string>(),
+      "http://127.0.0.1:9888/httptoimap?imapdir=" + base64_url_encode(mailbox) +
+          "&localpath=" + base64_url_encode("E:\\media\\movies\\alpha.mp4"));
+  EXPECT_EQ(
+      playlist["series"]["beta.mp4"].get<std::string>(),
+      "http://127.0.0.1:9888/httptoimap?imapdir=" + base64_url_encode(mailbox) +
+          "&localpath=" + base64_url_encode("E:/media/movies/series/beta.mp4"));
 }
 
 TEST(MailfsServiceTest, CachesMailboxInBatchesAndParsesLegacyMetadata) {
