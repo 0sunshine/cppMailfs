@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,13 +42,22 @@ class ImapClient final : public application::ports::IMailTransport {
 
  private:
   net::SecureSocket socket_;
+  std::optional<core::model::AppConfig> connection_config_;
+  std::string username_;
+  std::string password_;
+  std::string selected_mailbox_;
   std::string active_tag_prefix_ = "A";
   std::size_t tag_counter_ = 0;
   bool connected_ = false;
 
   [[nodiscard]] std::string next_tag();
+  void open_authenticated_session();
+  void reconnect_after_timeout();
+  void select_mailbox_once(const std::string& mailbox);
   CommandResponse execute(const std::string& command,
                           const std::function<void()>& continuation_writer = {});
+  CommandResponse execute_once(const std::string& command,
+                               const std::function<void()>& continuation_writer = {});
   static std::string quote_string(const std::string& value);
   static void ensure_ok(const CommandResponse& response, const std::string& command_name);
 };

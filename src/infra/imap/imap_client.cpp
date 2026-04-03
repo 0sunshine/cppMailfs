@@ -1,9 +1,11 @@
 #include "mailfs/infra/imap/imap_client.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include "mailfs/infra/logging/logger.hpp"
 #include "mailfs/infra/imap/imap_utf7.hpp"
@@ -30,6 +32,10 @@ std::string sanitize_command_for_log(std::string_view command) {
   return std::string(command);
 }
 
+bool is_tls_read_timeout(const std::runtime_error& ex) {
+  return std::string_view(ex.what()) == "TLS read timed out while waiting for server response";
+}
+
 }  // namespace
 
 ImapClient::~ImapClient() {
@@ -39,18 +45,32 @@ ImapClient::~ImapClient() {
 void ImapClient::connect(const core::model::AppConfig& config,
                          const std::string& username,
                          const std::string& password) {
-  logging::log_info("imap", "connecting to " + config.imap_host + ":" + std::to_string(config.imap_port));
-  socket_.connect(
-      config.imap_host, config.imap_port, config.allow_insecure_tls, std::filesystem::u8path(config.ca_cert_file));
+  connection_config_ = config;
+  username_ = username;
+  password_ = password;
+  selected_mailbox_.clear();
 
-  const auto greeting = socket_.read_line();
-  if (greeting.rfind("* OK", 0) != 0 && greeting.rfind("* PREAUTH", 0) != 0) {
-    throw std::runtime_error("IMAP greeting rejected: " + greeting);
+  constexpr auto kRetryDelay = std::chrono::seconds(3);
+  constexpr int kMaxRetries = 1;
+
+  for (int attempt = 0;; ++attempt) {
+    try {
+      open_authenticated_session();
+      return;
+    } catch (const std::runtime_error& ex) {
+      socket_.close();
+      connected_ = false;
+      tag_counter_ = 0;
+      if (!is_tls_read_timeout(ex) || attempt >= kMaxRetries) {
+        throw;
+      }
+      logging::log_warn(
+          "imap",
+          "IMAP connect timed out while waiting for server response; reconnecting in 3 seconds (" +
+              std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + ")");
+      std::this_thread::sleep_for(kRetryDelay);
+    }
   }
-
-  ensure_ok(execute("LOGIN " + quote_string(username) + " " + quote_string(password)), "LOGIN");
-  connected_ = true;
-  logging::log_info("imap", "LOGIN completed");
 }
 
 void ImapClient::disconnect() noexcept {
@@ -63,6 +83,7 @@ void ImapClient::disconnect() noexcept {
   }
   socket_.close();
   connected_ = false;
+  selected_mailbox_.clear();
   if (was_connected) {
     logging::log_info("imap", "disconnected");
   }
@@ -83,18 +104,8 @@ std::vector<std::string> ImapClient::list_mailboxes(const std::string& pattern) 
 }
 
 void ImapClient::select_mailbox(const std::string& mailbox) {
-  std::string raw_mailbox = encode_imap_utf7(mailbox);
-  const auto list_response = execute("LIST \"\" " + quote_string(raw_mailbox));
-  ensure_ok(list_response, "LIST");
-  for (const auto& chunk : list_response.chunks) {
-    const auto parsed = ImapResponseParser::parse_list_mailbox_name(chunk.line, chunk.literal);
-    if (parsed.has_value() && parsed->decoded_name == mailbox) {
-      raw_mailbox = parsed->raw_name;
-      break;
-    }
-  }
-  logging::log_debug("imap", "SELECT mailbox " + mailbox + " raw=" + raw_mailbox);
-  ensure_ok(execute("SELECT " + quote_string(raw_mailbox)), "SELECT");
+  select_mailbox_once(mailbox);
+  selected_mailbox_ = mailbox;
 }
 
 std::vector<std::uint64_t> ImapClient::search_all_uids() {
@@ -187,6 +198,60 @@ std::optional<std::uint64_t> ImapClient::append_message(const std::string& mailb
   return ImapResponseParser::parse_append_uid(response.text);
 }
 
+void ImapClient::open_authenticated_session() {
+  if (!connection_config_.has_value()) {
+    throw std::runtime_error("IMAP connection configuration is not initialized");
+  }
+
+  logging::log_info("imap",
+                    "connecting to " + connection_config_->imap_host + ":" + std::to_string(connection_config_->imap_port));
+  socket_.connect(connection_config_->imap_host,
+                  connection_config_->imap_port,
+                  connection_config_->allow_insecure_tls,
+                  std::filesystem::u8path(connection_config_->ca_cert_file));
+  tag_counter_ = 0;
+
+  const auto greeting = socket_.read_line();
+  if (greeting.rfind("* OK", 0) != 0 && greeting.rfind("* PREAUTH", 0) != 0) {
+    throw std::runtime_error("IMAP greeting rejected: " + greeting);
+  }
+
+  ensure_ok(execute_once("LOGIN " + quote_string(username_) + " " + quote_string(password_)), "LOGIN");
+  connected_ = true;
+  logging::log_info("imap", "LOGIN completed");
+}
+
+void ImapClient::reconnect_after_timeout() {
+  if (!connection_config_.has_value() || username_.empty()) {
+    throw std::runtime_error("cannot reconnect IMAP session because credentials are unavailable");
+  }
+
+  const auto mailbox = selected_mailbox_;
+  socket_.close();
+  connected_ = false;
+  tag_counter_ = 0;
+  open_authenticated_session();
+  if (!mailbox.empty()) {
+    select_mailbox_once(mailbox);
+    selected_mailbox_ = mailbox;
+  }
+}
+
+void ImapClient::select_mailbox_once(const std::string& mailbox) {
+  std::string raw_mailbox = encode_imap_utf7(mailbox);
+  const auto list_response = execute("LIST \"\" " + quote_string(raw_mailbox));
+  ensure_ok(list_response, "LIST");
+  for (const auto& chunk : list_response.chunks) {
+    const auto parsed = ImapResponseParser::parse_list_mailbox_name(chunk.line, chunk.literal);
+    if (parsed.has_value() && parsed->decoded_name == mailbox) {
+      raw_mailbox = parsed->raw_name;
+      break;
+    }
+  }
+  logging::log_debug("imap", "SELECT mailbox " + mailbox + " raw=" + raw_mailbox);
+  ensure_ok(execute("SELECT " + quote_string(raw_mailbox)), "SELECT");
+}
+
 std::string ImapClient::next_tag() {
   std::ostringstream stream;
   stream << active_tag_prefix_ << std::setw(4) << std::setfill('0') << ++tag_counter_;
@@ -194,6 +259,26 @@ std::string ImapClient::next_tag() {
 }
 
 CommandResponse ImapClient::execute(const std::string& command, const std::function<void()>& continuation_writer) {
+  constexpr auto kRetryDelay = std::chrono::seconds(3);
+  constexpr int kMaxRetries = 1;
+
+  for (int attempt = 0;; ++attempt) {
+    try {
+      return execute_once(command, continuation_writer);
+    } catch (const std::runtime_error& ex) {
+      if (!is_tls_read_timeout(ex) || attempt >= kMaxRetries) {
+        throw;
+      }
+      logging::log_warn("imap",
+                        "command timed out while waiting for server response; reconnecting in 3 seconds (" +
+                            std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + ")");
+      std::this_thread::sleep_for(kRetryDelay);
+      reconnect_after_timeout();
+    }
+  }
+}
+
+CommandResponse ImapClient::execute_once(const std::string& command, const std::function<void()>& continuation_writer) {
   const auto tag = next_tag();
   if (logging::Logger::instance().should_log(logging::LogLevel::kDebug)) {
     logging::log_debug("imap", "sending command " + tag + " " + sanitize_command_for_log(command));
