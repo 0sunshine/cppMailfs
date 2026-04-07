@@ -115,6 +115,46 @@ TEST(SQLiteCacheRepositoryTest, PreservesLargeFileMetadataAndBlockSizes) {
   std::filesystem::remove(db_path);
 }
 
+TEST(SQLiteCacheRepositoryTest, ClearMailboxRemovesOnlyTargetMailboxEntries) {
+  const auto db_path = std::filesystem::temp_directory_path() / "mailfs_repo_clear_mailbox_test.db";
+  std::filesystem::remove(db_path);
+
+  {
+    mailfs::infra::storage::SQLiteCacheRepository repository(db_path);
+    repository.initialize();
+
+    mailfs::core::model::MailBlockMetadata archive_metadata;
+    archive_metadata.subject = "movie/plain/1-1";
+    archive_metadata.file_md5 = "archive-md5";
+    archive_metadata.block_md5 = "archive-block";
+    archive_metadata.file_size = 10;
+    archive_metadata.block_size = 10;
+    archive_metadata.create_time = "2026-04-01T00:00:00Z";
+    archive_metadata.owner = "owner";
+    archive_metadata.local_path = "/archive/movie.mp4";
+    archive_metadata.mail_folder = "Archive";
+    archive_metadata.block_seq = 1;
+    archive_metadata.block_count = 1;
+    repository.upsert_mail_block(100, archive_metadata);
+
+    auto other_metadata = archive_metadata;
+    other_metadata.file_md5 = "other-md5";
+    other_metadata.block_md5 = "other-block";
+    other_metadata.local_path = "/other/movie.mp4";
+    other_metadata.mail_folder = "Other";
+    repository.upsert_mail_block(200, other_metadata);
+
+    repository.clear_mailbox("Archive");
+
+    EXPECT_TRUE(repository.list_files("Archive").empty());
+    EXPECT_TRUE(repository.get_cached_uids("Archive").empty());
+    ASSERT_EQ(repository.list_files("Other").size(), 1u);
+    EXPECT_TRUE(repository.get_cached_uids("Other").count(200));
+  }
+
+  std::filesystem::remove(db_path);
+}
+
 TEST(SQLiteCacheRepositoryTest, OpensDatabaseWithUtf8Path) {
   const auto db_path =
       std::filesystem::temp_directory_path() / std::filesystem::u8path(u8"\u7f13\u5b58_\u4ed3\u5e93\u6d4b\u8bd5.db");

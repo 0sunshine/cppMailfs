@@ -32,8 +32,29 @@ std::string sanitize_command_for_log(std::string_view command) {
   return std::string(command);
 }
 
-bool is_tls_read_timeout(const std::runtime_error& ex) {
-  return std::string_view(ex.what()) == "TLS read timed out while waiting for server response";
+bool is_retryable_append_busy(const CommandResponse& response) {
+  return response.status == "NO" && response.text.find("System busy") != std::string::npos;
+}
+
+bool starts_with(std::string_view text, std::string_view prefix) {
+  return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
+}
+
+bool contains(std::string_view text, std::string_view needle) {
+  return text.find(needle) != std::string_view::npos;
+}
+
+bool is_retryable_network_failure(const std::runtime_error& ex) {
+  const auto text = std::string_view(ex.what());
+  return text == "TLS read timed out while waiting for server response" ||
+         text == "remote side closed the TLS connection" ||
+         text == "socket is not connected" ||
+         starts_with(text, "mbedtls_net_connect failed:") ||
+         starts_with(text, "mbedtls_net_") ||
+         starts_with(text, "mbedtls_ssl_handshake failed:") ||
+         starts_with(text, "mbedtls_ssl_read failed:") ||
+         starts_with(text, "mbedtls_ssl_write failed:") ||
+         contains(text, "Failed to get an IP address for the given hostname");
 }
 
 }  // namespace
@@ -51,7 +72,7 @@ void ImapClient::connect(const core::model::AppConfig& config,
   selected_mailbox_.clear();
 
   constexpr auto kRetryDelay = std::chrono::seconds(3);
-  constexpr int kMaxRetries = 1;
+  constexpr int kMaxRetries = 3;
 
   for (int attempt = 0;; ++attempt) {
     try {
@@ -61,13 +82,13 @@ void ImapClient::connect(const core::model::AppConfig& config,
       socket_.close();
       connected_ = false;
       tag_counter_ = 0;
-      if (!is_tls_read_timeout(ex) || attempt >= kMaxRetries) {
+      if (!is_retryable_network_failure(ex) || attempt >= kMaxRetries) {
         throw;
       }
       logging::log_warn(
           "imap",
-          "IMAP connect timed out while waiting for server response; reconnecting in 3 seconds (" +
-              std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + ")");
+          "IMAP connect hit a retryable network failure; reconnecting in 3 seconds (" +
+              std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + "): " + ex.what());
       std::this_thread::sleep_for(kRetryDelay);
     }
   }
@@ -189,13 +210,25 @@ std::optional<std::uint64_t> ImapClient::append_message(const std::string& mailb
     payload += "\r\n";
   }
 
-  logging::log_debug("imap", "APPEND mailbox " + mailbox + " bytes=" + std::to_string(payload.size()));
-  const auto response =
-      execute("APPEND " + quote_string(encode_imap_utf7(mailbox)) + " {" + std::to_string(payload.size()) + "}", [&] {
-    socket_.send_all(payload);
-  });
-  ensure_ok(response, "APPEND");
-  return ImapResponseParser::parse_append_uid(response.text);
+  constexpr auto kRetryDelay = std::chrono::seconds(3);
+  constexpr int kMaxBusyRetries = 3;
+  const auto command = "APPEND " + quote_string(encode_imap_utf7(mailbox)) + " {" + std::to_string(payload.size()) + "}";
+
+  for (int attempt = 0;; ++attempt) {
+    logging::log_debug("imap", "APPEND mailbox " + mailbox + " bytes=" + std::to_string(payload.size()));
+    const auto response = execute(command, [&] {
+      socket_.send_all(payload);
+    });
+    if (!is_retryable_append_busy(response) || attempt >= kMaxBusyRetries) {
+      ensure_ok(response, "APPEND");
+      return ImapResponseParser::parse_append_uid(response.text);
+    }
+
+    logging::log_warn("imap",
+                      "APPEND returned NO System busy; retrying in 3 seconds (" + std::to_string(attempt + 1) + "/" +
+                          std::to_string(kMaxBusyRetries) + ")");
+    std::this_thread::sleep_for(kRetryDelay);
+  }
 }
 
 void ImapClient::open_authenticated_session() {
@@ -221,7 +254,7 @@ void ImapClient::open_authenticated_session() {
   logging::log_info("imap", "LOGIN completed");
 }
 
-void ImapClient::reconnect_after_timeout() {
+void ImapClient::reconnect_after_connection_failure() {
   if (!connection_config_.has_value() || username_.empty()) {
     throw std::runtime_error("cannot reconnect IMAP session because credentials are unavailable");
   }
@@ -260,20 +293,20 @@ std::string ImapClient::next_tag() {
 
 CommandResponse ImapClient::execute(const std::string& command, const std::function<void()>& continuation_writer) {
   constexpr auto kRetryDelay = std::chrono::seconds(3);
-  constexpr int kMaxRetries = 1;
+  constexpr int kMaxRetries = 3;
 
   for (int attempt = 0;; ++attempt) {
     try {
       return execute_once(command, continuation_writer);
     } catch (const std::runtime_error& ex) {
-      if (!is_tls_read_timeout(ex) || attempt >= kMaxRetries) {
+      if (!is_retryable_network_failure(ex) || attempt >= kMaxRetries) {
         throw;
       }
       logging::log_warn("imap",
-                        "command timed out while waiting for server response; reconnecting in 3 seconds (" +
-                            std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + ")");
+                        "command hit a retryable network failure; reconnecting in 3 seconds (" +
+                            std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries) + "): " + ex.what());
       std::this_thread::sleep_for(kRetryDelay);
-      reconnect_after_timeout();
+      reconnect_after_connection_failure();
     }
   }
 }

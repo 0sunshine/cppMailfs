@@ -19,6 +19,7 @@ class SQLiteCacheRepository final : public application::ports::ICacheRepository 
   void initialize() override;
   void upsert_mail_block(std::uint64_t uid, const core::model::MailBlockMetadata& metadata) override;
   void remove_message_uid(const std::string& mailbox, std::uint64_t uid) override;
+  void clear_mailbox(const std::string& mailbox) override;
   std::set<std::uint64_t> get_cached_uids(const std::string& mailbox) const override;
   std::vector<core::model::CachedFileRecord> list_files(const std::string& mailbox) const override;
   std::optional<core::model::CachedFileRecord> find_file(const std::string& mailbox,

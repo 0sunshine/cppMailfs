@@ -72,6 +72,7 @@ void print_usage() {
       << "  mailfs_cli [--config path] cache-mailbox [mailbox]\n"
       << "  mailfs_cli [--config path] list-cache [mailbox]\n"
       << "  mailfs_cli [--config path] check-integrity [mailbox] [local-path-prefix]\n"
+      << "  mailfs_cli [--config path] dedup-mailbox [mailbox] [local-path-prefix]\n"
       << "  mailfs_cli [--config path] delete-uid [mailbox] <uid>\n"
       << "  mailfs_cli [--config path] export-playlist [mailbox] [output-json] [local-path-prefix]\n"
       << "  mailfs_cli [--config path] upload [mailbox] <local-file-or-directory>\n"
@@ -200,6 +201,37 @@ int run_cli(std::vector<std::string> args) {
                   << " expected=" << result.expected_blocks << '\n';
       }
       std::cout << "integrity ok=" << ok_count << " broken=" << broken_count << " total=" << results.size() << '\n';
+      return 0;
+    }
+
+    if (command == "dedup-mailbox") {
+      if (args.size() > 3) {
+        print_usage();
+        return 1;
+      }
+      std::optional<std::string> explicit_mailbox;
+      std::string prefix;
+      if (args.size() == 2) {
+        if (!config.default_mailbox.empty() && looks_like_local_path(args[1])) {
+          prefix = args[1];
+        } else {
+          explicit_mailbox = args[1];
+        }
+      } else if (args.size() == 3) {
+        explicit_mailbox = args[1];
+        prefix = args[2];
+      }
+      const auto mailbox = resolve_mailbox(config, explicit_mailbox, command);
+      const auto results = service.deduplicate_mailbox(mailbox, prefix, [](std::size_t done, std::size_t total) {
+        print_count_progress("dedup-mailbox-scan", done, total);
+      });
+      std::size_t deleted_uid_count = 0;
+      for (const auto& result : results) {
+        deleted_uid_count += result.deleted_uids.size();
+        std::cout << "DEDUP " << result.local_path << " keep=" << result.kept_uids.size()
+                  << " delete=" << result.deleted_uids.size() << '\n';
+      }
+      std::cout << "dedup complete: files=" << results.size() << " deleted_uids=" << deleted_uid_count << '\n';
       return 0;
     }
 

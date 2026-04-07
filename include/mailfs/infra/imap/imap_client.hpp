@@ -52,7 +52,7 @@ class ImapClient final : public application::ports::IMailTransport {
 
   [[nodiscard]] std::string next_tag();
   void open_authenticated_session();
-  void reconnect_after_timeout();
+  void reconnect_after_connection_failure();
   void select_mailbox_once(const std::string& mailbox);
   CommandResponse execute(const std::string& command,
                           const std::function<void()>& continuation_writer = {});

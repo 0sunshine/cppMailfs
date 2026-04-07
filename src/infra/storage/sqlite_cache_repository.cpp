@@ -175,6 +175,34 @@ void SQLiteCacheRepository::remove_message_uid(const std::string& mailbox, std::
   }
 }
 
+void SQLiteCacheRepository::clear_mailbox(const std::string& mailbox) {
+  execute_sql("BEGIN IMMEDIATE TRANSACTION;");
+  try {
+    {
+      Statement delete_blocks(
+          db_,
+          "DELETE FROM cache_blocks WHERE fileid IN (SELECT fileid FROM cache_files WHERE mailfolder = ?);");
+      bind_text(delete_blocks.get(), 1, mailbox);
+      if (sqlite3_step(delete_blocks.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(db_));
+      }
+    }
+
+    {
+      Statement delete_files(db_, "DELETE FROM cache_files WHERE mailfolder = ?;");
+      bind_text(delete_files.get(), 1, mailbox);
+      if (sqlite3_step(delete_files.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(db_));
+      }
+    }
+
+    execute_sql("COMMIT;");
+  } catch (...) {
+    execute_sql("ROLLBACK;");
+    throw;
+  }
+}
+
 std::set<std::uint64_t> SQLiteCacheRepository::get_cached_uids(const std::string& mailbox) const {
   Statement statement(
       db_,

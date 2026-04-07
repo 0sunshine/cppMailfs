@@ -8,6 +8,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 #include <nlohmann/json.hpp>
 
@@ -424,6 +425,60 @@ bool is_cacheable_metadata(const core::model::MailBlockMetadata& metadata) {
   return !metadata.subject.empty() && !metadata.local_path.empty() && metadata.block_seq > 0 && metadata.block_count > 0;
 }
 
+struct RemoteBlockSnapshot {
+  std::uint64_t uid = 0;
+  core::model::MailBlockMetadata metadata;
+};
+
+struct VersionKey {
+  std::string file_md5;
+  std::uint64_t file_size = 0;
+  std::int32_t block_count = 0;
+
+  bool operator<(const VersionKey& other) const {
+    return std::tie(file_md5, file_size, block_count) < std::tie(other.file_md5, other.file_size, other.block_count);
+  }
+};
+
+struct VersionCandidate {
+  VersionKey key;
+  std::map<std::int32_t, RemoteBlockSnapshot> best_blocks_by_seq;
+  std::vector<std::uint64_t> duplicate_uids;
+
+  [[nodiscard]] bool is_complete() const {
+    if (key.block_count <= 0 || best_blocks_by_seq.size() != static_cast<std::size_t>(key.block_count)) {
+      return false;
+    }
+    for (std::int32_t seq = 1; seq <= key.block_count; ++seq) {
+      const auto it = best_blocks_by_seq.find(seq);
+      if (it == best_blocks_by_seq.end() || it->second.uid == 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] std::uint64_t max_uid() const {
+    std::uint64_t max_uid_value = 0;
+    for (const auto& [seq, block] : best_blocks_by_seq) {
+      static_cast<void>(seq);
+      max_uid_value = std::max(max_uid_value, block.uid);
+    }
+    return max_uid_value;
+  }
+
+  [[nodiscard]] std::vector<std::uint64_t> kept_uids() const {
+    std::vector<std::uint64_t> result;
+    result.reserve(best_blocks_by_seq.size());
+    for (const auto& [seq, block] : best_blocks_by_seq) {
+      static_cast<void>(seq);
+      result.push_back(block.uid);
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+};
+
 }  // namespace
 
 MailfsService::MailfsService(core::model::AppConfig config,
@@ -580,6 +635,141 @@ std::vector<IntegrityCheckResult> MailfsService::check_cached_integrity(const st
   return results;
 }
 
+std::vector<DeduplicationResult> MailfsService::deduplicate_mailbox(const std::string& mailbox,
+                                                                    const std::string& local_path_prefix,
+                                                                    CacheProgressCallback progress) {
+  ensure_mailbox_selected(mailbox);
+  infra::logging::log_info("service", "deduplicating mailbox " + mailbox);
+
+  const auto all_uids = transport_.search_all_uids();
+  const auto total = all_uids.size();
+  if (progress) {
+    progress(0, total);
+  }
+
+  std::map<std::string, std::map<VersionKey, VersionCandidate>> groups_by_path;
+  const auto batch_size = std::max<std::size_t>(1, config_.cache_fetch_batch_size);
+  std::size_t processed_count = 0;
+  for (std::size_t offset = 0; offset < all_uids.size(); offset += batch_size) {
+    const auto end = std::min(offset + batch_size, all_uids.size());
+    std::vector<std::uint64_t> batch(all_uids.begin() + static_cast<std::ptrdiff_t>(offset),
+                                     all_uids.begin() + static_cast<std::ptrdiff_t>(end));
+    const auto metadata_entries = transport_.fetch_metadata(batch);
+    for (const auto& entry : metadata_entries) {
+      core::model::MailBlockMetadata metadata;
+      try {
+        metadata = parse_cached_metadata_text(entry.metadata_text);
+        if (metadata.encrypted) {
+          metadata.local_path = core::security::decrypt_string(metadata.local_path);
+        }
+      } catch (const std::exception& ex) {
+        infra::logging::log_warn("service",
+                                 "skipping uid " + std::to_string(entry.uid) + " while deduplicating " + mailbox +
+                                     ": " + ex.what());
+        continue;
+      }
+      if (!is_cacheable_metadata(metadata)) {
+        continue;
+      }
+      if (metadata.mail_folder.empty()) {
+        metadata.mail_folder = mailbox;
+      }
+      if (!path_matches_prefix(metadata.local_path, local_path_prefix)) {
+        continue;
+      }
+
+      VersionKey key{metadata.file_md5, metadata.file_size, metadata.block_count};
+      auto& candidate = groups_by_path[metadata.local_path][key];
+      candidate.key = key;
+
+      const auto block_it = candidate.best_blocks_by_seq.find(metadata.block_seq);
+      if (block_it == candidate.best_blocks_by_seq.end()) {
+        candidate.best_blocks_by_seq.emplace(metadata.block_seq, RemoteBlockSnapshot{entry.uid, metadata});
+      } else if (entry.uid > block_it->second.uid) {
+        candidate.duplicate_uids.push_back(block_it->second.uid);
+        block_it->second = RemoteBlockSnapshot{entry.uid, metadata};
+      } else {
+        candidate.duplicate_uids.push_back(entry.uid);
+      }
+    }
+    processed_count += batch.size();
+    if (progress) {
+      progress(processed_count, total);
+    }
+  }
+
+  std::vector<DeduplicationResult> results;
+  std::vector<std::uint64_t> deleted_uids;
+  for (auto& [local_path, versions] : groups_by_path) {
+    if (versions.size() <= 1) {
+      auto only = versions.begin();
+      if (!only->second.duplicate_uids.empty()) {
+        DeduplicationResult result;
+        result.local_path = local_path;
+        result.kept_file_md5 = only->second.key.file_md5;
+        result.kept_uids = only->second.kept_uids();
+        result.deleted_uids = only->second.duplicate_uids;
+        std::sort(result.deleted_uids.begin(), result.deleted_uids.end());
+        deleted_uids.insert(deleted_uids.end(), result.deleted_uids.begin(), result.deleted_uids.end());
+        results.push_back(std::move(result));
+      }
+      continue;
+    }
+
+    auto keep_it = versions.begin();
+    for (auto it = versions.begin(); it != versions.end(); ++it) {
+      const auto keep_score = std::make_pair(keep_it->second.is_complete(), keep_it->second.max_uid());
+      const auto current_score = std::make_pair(it->second.is_complete(), it->second.max_uid());
+      if (current_score > keep_score) {
+        keep_it = it;
+      }
+    }
+
+    DeduplicationResult result;
+    result.local_path = local_path;
+    result.kept_file_md5 = keep_it->second.key.file_md5;
+    result.kept_uids = keep_it->second.kept_uids();
+    result.deleted_uids = keep_it->second.duplicate_uids;
+
+    for (auto it = versions.begin(); it != versions.end(); ++it) {
+      if (it == keep_it) {
+        continue;
+      }
+      const auto kept = it->second.kept_uids();
+      result.deleted_uids.insert(result.deleted_uids.end(), kept.begin(), kept.end());
+      result.deleted_uids.insert(result.deleted_uids.end(),
+                                 it->second.duplicate_uids.begin(),
+                                 it->second.duplicate_uids.end());
+    }
+
+    std::sort(result.deleted_uids.begin(), result.deleted_uids.end());
+    result.deleted_uids.erase(std::unique(result.deleted_uids.begin(), result.deleted_uids.end()), result.deleted_uids.end());
+    if (!result.deleted_uids.empty()) {
+      deleted_uids.insert(deleted_uids.end(), result.deleted_uids.begin(), result.deleted_uids.end());
+      results.push_back(std::move(result));
+    }
+  }
+
+  std::sort(deleted_uids.begin(), deleted_uids.end());
+  deleted_uids.erase(std::unique(deleted_uids.begin(), deleted_uids.end()), deleted_uids.end());
+  for (const auto uid : deleted_uids) {
+    infra::logging::log_warn("service", "dedup deleting uid " + std::to_string(uid) + " from " + mailbox);
+    transport_.delete_message_by_uid(uid);
+  }
+
+  if (!deleted_uids.empty()) {
+    repository_.clear_mailbox(mailbox);
+    cache_mailbox(mailbox);
+  }
+
+  std::sort(results.begin(), results.end(), [](const DeduplicationResult& lhs, const DeduplicationResult& rhs) {
+    return lhs.local_path < rhs.local_path;
+  });
+  infra::logging::log_info("service",
+                           "dedup complete for " + mailbox + ", deleted_uids=" + std::to_string(deleted_uids.size()));
+  return results;
+}
+
 std::string MailfsService::export_playlist_json(const std::string& mailbox, const std::string& local_path_prefix) {
   const auto files = repository_.list_files(mailbox);
   nlohmann::json root = nlohmann::json::object();
@@ -661,6 +851,15 @@ void MailfsService::upload_file(const std::string& mailbox,
                                 : local_file.filename().u8string();
   const auto attachment_name = subject_name;
   const auto stored_local_path = encrypted ? core::security::encrypt_string(local_path_text) : local_path_text;
+  auto existing = repository_.find_file(mailbox, local_path_text);
+  if (!existing.has_value() && encrypted) {
+    existing = repository_.find_file(mailbox, stored_local_path);
+  }
+  if (existing.has_value()) {
+    infra::logging::log_info("service",
+                             "skip upload because file already exists in cache index for " + mailbox + ":" + local_path_text);
+    return;
+  }
 
   std::ifstream input(local_file, std::ios::binary);
   if (!input) {

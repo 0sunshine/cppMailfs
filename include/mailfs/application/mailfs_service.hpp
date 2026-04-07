@@ -31,6 +31,13 @@ struct IntegrityCheckResult {
   bool ok = false;
 };
 
+struct DeduplicationResult {
+  std::string local_path;
+  std::string kept_file_md5;
+  std::vector<std::uint64_t> kept_uids;
+  std::vector<std::uint64_t> deleted_uids;
+};
+
 class MailfsService {
  public:
   MailfsService(core::model::AppConfig config,
@@ -53,6 +60,9 @@ class MailfsService {
                                       BlockProgressCallback progress = {});
   std::vector<IntegrityCheckResult> check_cached_integrity(const std::string& mailbox,
                                                            const std::string& local_path_prefix = {});
+  std::vector<DeduplicationResult> deduplicate_mailbox(const std::string& mailbox,
+                                                       const std::string& local_path_prefix = {},
+                                                       CacheProgressCallback progress = {});
   std::string export_playlist_json(const std::string& mailbox, const std::string& local_path_prefix = {});
   core::model::CachedFileRecord resolve_cached_file(const std::string& mailbox, const std::string& local_path);
   DownloadedBlockData fetch_cached_block(const std::string& mailbox,
