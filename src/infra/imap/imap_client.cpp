@@ -32,7 +32,7 @@ std::string sanitize_command_for_log(std::string_view command) {
   return std::string(command);
 }
 
-bool is_retryable_append_busy(const CommandResponse& response) {
+bool is_retryable_system_busy(const CommandResponse& response) {
   return response.status == "NO" && response.text.find("System busy") != std::string::npos;
 }
 
@@ -200,8 +200,35 @@ std::vector<application::ports::FetchedMetadata> ImapClient::fetch_metadata(cons
 
 void ImapClient::delete_message_by_uid(std::uint64_t uid) {
   logging::log_warn("imap", "UID STORE + EXPUNGE uid=" + std::to_string(uid));
-  ensure_ok(execute("UID STORE " + std::to_string(uid) + " +FLAGS.SILENT (\\Deleted)"), "UID STORE");
-  ensure_ok(execute("EXPUNGE"), "EXPUNGE");
+
+  constexpr auto kRetryDelay = std::chrono::seconds(3);
+  constexpr int kMaxBusyRetries = 3;
+
+  for (int attempt = 0;; ++attempt) {
+    const auto store_response = execute("UID STORE " + std::to_string(uid) + " +FLAGS.SILENT (\\Deleted)");
+    if (!is_retryable_system_busy(store_response) || attempt >= kMaxBusyRetries) {
+      ensure_ok(store_response, "UID STORE");
+      break;
+    }
+
+    logging::log_warn("imap",
+                      "UID STORE returned NO System busy; retrying in 3 seconds (" + std::to_string(attempt + 1) +
+                          "/" + std::to_string(kMaxBusyRetries) + ")");
+    std::this_thread::sleep_for(kRetryDelay);
+  }
+
+  for (int attempt = 0;; ++attempt) {
+    const auto expunge_response = execute("EXPUNGE");
+    if (!is_retryable_system_busy(expunge_response) || attempt >= kMaxBusyRetries) {
+      ensure_ok(expunge_response, "EXPUNGE");
+      break;
+    }
+
+    logging::log_warn("imap",
+                      "EXPUNGE returned NO System busy; retrying in 3 seconds (" + std::to_string(attempt + 1) +
+                          "/" + std::to_string(kMaxBusyRetries) + ")");
+    std::this_thread::sleep_for(kRetryDelay);
+  }
 }
 
 std::optional<std::uint64_t> ImapClient::append_message(const std::string& mailbox, const std::string& raw_message) {
@@ -219,7 +246,7 @@ std::optional<std::uint64_t> ImapClient::append_message(const std::string& mailb
     const auto response = execute(command, [&] {
       socket_.send_all(payload);
     });
-    if (!is_retryable_append_busy(response) || attempt >= kMaxBusyRetries) {
+    if (!is_retryable_system_busy(response) || attempt >= kMaxBusyRetries) {
       ensure_ok(response, "APPEND");
       return ImapResponseParser::parse_append_uid(response.text);
     }

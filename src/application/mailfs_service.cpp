@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -479,6 +480,32 @@ struct VersionCandidate {
   }
 };
 
+void add_remote_block_snapshot(std::map<std::string, std::map<VersionKey, VersionCandidate>>& groups_by_path,
+                               std::uint64_t uid,
+                               core::model::MailBlockMetadata metadata,
+                               const std::string& local_path_prefix) {
+  if (!is_cacheable_metadata(metadata)) {
+    return;
+  }
+  if (!path_matches_prefix(metadata.local_path, local_path_prefix)) {
+    return;
+  }
+
+  VersionKey key{metadata.file_md5, metadata.file_size, metadata.block_count};
+  auto& candidate = groups_by_path[metadata.local_path][key];
+  candidate.key = key;
+
+  const auto block_it = candidate.best_blocks_by_seq.find(metadata.block_seq);
+  if (block_it == candidate.best_blocks_by_seq.end()) {
+    candidate.best_blocks_by_seq.emplace(metadata.block_seq, RemoteBlockSnapshot{uid, std::move(metadata)});
+  } else if (uid > block_it->second.uid) {
+    candidate.duplicate_uids.push_back(block_it->second.uid);
+    block_it->second = RemoteBlockSnapshot{uid, std::move(metadata)};
+  } else {
+    candidate.duplicate_uids.push_back(uid);
+  }
+}
+
 }  // namespace
 
 MailfsService::MailfsService(core::model::AppConfig config,
@@ -643,17 +670,51 @@ std::vector<DeduplicationResult> MailfsService::deduplicate_mailbox(const std::s
 
   const auto all_uids = transport_.search_all_uids();
   const auto total = all_uids.size();
+  const auto cached_files = repository_.list_files(mailbox);
+  std::map<std::uint64_t, core::model::MailBlockMetadata> cached_metadata_by_uid;
+  for (const auto& file : cached_files) {
+    for (const auto& block : file.blocks) {
+      core::model::MailBlockMetadata metadata;
+      metadata.subject = core::model::MailBlockMetadata::make_subject(last_path_segment(file.local_path),
+                                                                      false,
+                                                                      block.block_seq,
+                                                                      file.block_count);
+      metadata.file_md5 = file.file_md5;
+      metadata.block_md5 = block.block_md5;
+      metadata.file_size = file.file_size;
+      metadata.block_size = block.block_size;
+      metadata.local_path = file.local_path;
+      metadata.mail_folder = file.mail_folder.empty() ? mailbox : file.mail_folder;
+      metadata.block_seq = block.block_seq;
+      metadata.block_count = file.block_count;
+      cached_metadata_by_uid.emplace(block.uid, std::move(metadata));
+    }
+  }
+
+  std::vector<std::uint64_t> uncached_uids;
+  uncached_uids.reserve(all_uids.size());
+  for (const auto uid : all_uids) {
+    if (cached_metadata_by_uid.find(uid) == cached_metadata_by_uid.end()) {
+      uncached_uids.push_back(uid);
+    }
+  }
+
   if (progress) {
-    progress(0, total);
+    progress(total - uncached_uids.size(), total);
   }
 
   std::map<std::string, std::map<VersionKey, VersionCandidate>> groups_by_path;
+  for (auto& [uid, metadata] : cached_metadata_by_uid) {
+    add_remote_block_snapshot(groups_by_path, uid, std::move(metadata), local_path_prefix);
+  }
+
   const auto batch_size = std::max<std::size_t>(1, config_.cache_fetch_batch_size);
   std::size_t processed_count = 0;
-  for (std::size_t offset = 0; offset < all_uids.size(); offset += batch_size) {
-    const auto end = std::min(offset + batch_size, all_uids.size());
-    std::vector<std::uint64_t> batch(all_uids.begin() + static_cast<std::ptrdiff_t>(offset),
-                                     all_uids.begin() + static_cast<std::ptrdiff_t>(end));
+  const auto cached_count = total - uncached_uids.size();
+  for (std::size_t offset = 0; offset < uncached_uids.size(); offset += batch_size) {
+    const auto end = std::min(offset + batch_size, uncached_uids.size());
+    std::vector<std::uint64_t> batch(uncached_uids.begin() + static_cast<std::ptrdiff_t>(offset),
+                                     uncached_uids.begin() + static_cast<std::ptrdiff_t>(end));
     const auto metadata_entries = transport_.fetch_metadata(batch);
     for (const auto& entry : metadata_entries) {
       core::model::MailBlockMetadata metadata;
@@ -674,27 +735,11 @@ std::vector<DeduplicationResult> MailfsService::deduplicate_mailbox(const std::s
       if (metadata.mail_folder.empty()) {
         metadata.mail_folder = mailbox;
       }
-      if (!path_matches_prefix(metadata.local_path, local_path_prefix)) {
-        continue;
-      }
-
-      VersionKey key{metadata.file_md5, metadata.file_size, metadata.block_count};
-      auto& candidate = groups_by_path[metadata.local_path][key];
-      candidate.key = key;
-
-      const auto block_it = candidate.best_blocks_by_seq.find(metadata.block_seq);
-      if (block_it == candidate.best_blocks_by_seq.end()) {
-        candidate.best_blocks_by_seq.emplace(metadata.block_seq, RemoteBlockSnapshot{entry.uid, metadata});
-      } else if (entry.uid > block_it->second.uid) {
-        candidate.duplicate_uids.push_back(block_it->second.uid);
-        block_it->second = RemoteBlockSnapshot{entry.uid, metadata};
-      } else {
-        candidate.duplicate_uids.push_back(entry.uid);
-      }
+      add_remote_block_snapshot(groups_by_path, entry.uid, std::move(metadata), local_path_prefix);
     }
     processed_count += batch.size();
     if (progress) {
-      progress(processed_count, total);
+      progress(cached_count + processed_count, total);
     }
   }
 
@@ -855,10 +900,26 @@ void MailfsService::upload_file(const std::string& mailbox,
   if (!existing.has_value() && encrypted) {
     existing = repository_.find_file(mailbox, stored_local_path);
   }
+
+  std::set<std::int32_t> uploaded_block_seqs;
   if (existing.has_value()) {
+    for (const auto& block : existing->blocks) {
+      if (block.block_seq >= 1 && block.block_seq <= block_count) {
+        uploaded_block_seqs.insert(block.block_seq);
+      }
+    }
+  }
+
+  if (uploaded_block_seqs.size() == static_cast<std::size_t>(block_count)) {
     infra::logging::log_info("service",
-                             "skip upload because file already exists in cache index for " + mailbox + ":" + local_path_text);
+                             "skip upload because all blocks already exist in cache index for " + mailbox + ":" +
+                                 local_path_text);
     return;
+  }
+  if (!uploaded_block_seqs.empty()) {
+    infra::logging::log_info("service",
+                             "resume upload for " + mailbox + ":" + local_path_text + ", existing_blocks=" +
+                                 std::to_string(uploaded_block_seqs.size()) + "/" + std::to_string(block_count));
   }
 
   std::ifstream input(local_file, std::ios::binary);
@@ -868,6 +929,12 @@ void MailfsService::upload_file(const std::string& mailbox,
 
   for (std::int32_t block_seq = 1; block_seq <= block_count; ++block_seq) {
     auto payload = read_block(input, block_size);
+    if (uploaded_block_seqs.find(block_seq) != uploaded_block_seqs.end()) {
+      if (progress) {
+        progress(block_seq, block_count, local_file.filename().u8string());
+      }
+      continue;
+    }
 
     core::model::MailBlockMetadata metadata;
     metadata.subject = core::model::MailBlockMetadata::make_subject(subject_name, encrypted, block_seq, block_count);

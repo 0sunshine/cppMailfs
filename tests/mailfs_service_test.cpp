@@ -746,6 +746,75 @@ TEST(MailfsServiceTest, UploadSkipsWhenSameMailboxAndLocalPathAlreadyExist) {
   mailfs::infra::logging::Logger::instance().reset_for_tests();
 }
 
+TEST(MailfsServiceTest, UploadResumesByAppendingOnlyMissingBlockSequences) {
+  const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_upload_resume_missing.txt";
+  {
+    std::ofstream output(credential_path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "user@example.com\n";
+    output << "s3cret\n";
+  }
+
+  const auto upload_dir = std::filesystem::temp_directory_path() / "mailfs_upload_resume_missing_dir";
+  std::filesystem::create_directories(upload_dir);
+  const auto local_file = upload_dir / "demo.bin";
+  {
+    std::ofstream output(local_file, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "aaaaaaaabbbbbbbbcccccccc";
+  }
+
+  mailfs::core::model::AppConfig config;
+  config.credential_file = credential_path.u8string();
+  config.default_block_size = 8;
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+  mailfs::infra::logging::Logger::instance().configure({
+      mailfs::infra::logging::LogLevel::kOff,
+      {},
+      false,
+  });
+
+  TestTransport transport;
+  transport.appended_uids = {2002};
+  DownloadRepository repository;
+  repository.file.file_id = 1;
+  repository.file.mail_folder = "Archive";
+  repository.file.local_path = std::filesystem::absolute(local_file).lexically_normal().u8string();
+  repository.file.block_count = 3;
+  repository.file.file_md5 = "existing-file-md5";
+  repository.file.file_size = 24;
+  repository.file.blocks = {
+      {1, 2001, "existing-block-1", 8},
+      {3, 2003, "existing-block-3", 8},
+  };
+
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  std::vector<std::tuple<std::int64_t, std::int64_t, std::string>> progress_events;
+  service.upload_file("Archive", local_file, [&](std::int64_t current,
+                                                 std::int64_t total,
+                                                 const std::string& file_name) {
+    progress_events.emplace_back(current, total, file_name);
+  });
+
+  ASSERT_EQ(transport.appended_messages.size(), 1u);
+  const auto parsed = mailfs::core::mime::MimeMessage::parse(transport.appended_messages.front());
+  ASSERT_EQ(parsed.parts.size(), 2u);
+  const std::string metadata_text(parsed.parts[0].body.begin(), parsed.parts[0].body.end());
+  const auto metadata = mailfs::core::model::MailBlockMetadata::from_serialized_text(metadata_text);
+  EXPECT_EQ(metadata.block_seq, 2);
+  EXPECT_EQ(metadata.block_count, 3);
+  EXPECT_EQ(metadata.local_path, repository.file.local_path);
+  const std::string payload(parsed.parts[1].body.begin(), parsed.parts[1].body.end());
+  EXPECT_EQ(payload, "bbbbbbbb");
+  EXPECT_EQ(progress_events.size(), 3u);
+
+  std::filesystem::remove(local_file);
+  std::filesystem::remove(upload_dir);
+  std::filesystem::remove(credential_path);
+  mailfs::infra::logging::Logger::instance().reset_for_tests();
+}
+
 TEST(MailfsServiceTest, UploadWithoutAppendUidDoesNotRefreshMailboxCacheInternally) {
   const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_upload_no_appenduid.txt";
   {
@@ -900,6 +969,64 @@ TEST(MailfsServiceTest, DeduplicateMailboxKeepsNewestCompleteVersionAndRebuildsC
   ASSERT_EQ(repository.upserts.size(), 2u);
   EXPECT_EQ(repository.upserts[0].first, 104u);
   EXPECT_EQ(repository.upserts[1].first, 105u);
+
+  std::filesystem::remove(credential_path);
+}
+
+TEST(MailfsServiceTest, DeduplicateMailboxSkipsFetchingUidsAlreadyPresentInSQLiteCache) {
+  const auto credential_path = std::filesystem::temp_directory_path() / "mailfs_dedup_cached_uids.txt";
+  {
+    std::ofstream output(credential_path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "user@example.com\n";
+    output << "s3cret\n";
+  }
+
+  const std::string mailbox = "Archive";
+
+  ListingRepository repository;
+  repository.files = {
+      mailfs::core::model::CachedFileRecord{
+          1,
+          mailbox,
+          "E:/video/cached.mp4",
+          2,
+          "cached-file",
+          200,
+          {
+              {1, 100, "cached-block-1", 100},
+              {2, 101, "cached-block-2", 100},
+          },
+      },
+  };
+
+  mailfs::core::model::MailBlockMetadata uncached_metadata;
+  uncached_metadata.subject = "fresh.mp4/plain/1-1";
+  uncached_metadata.file_md5 = "fresh-file";
+  uncached_metadata.block_md5 = "fresh-block";
+  uncached_metadata.file_size = 50;
+  uncached_metadata.block_size = 50;
+  uncached_metadata.create_time = "2026-04-08T00:00:00Z";
+  uncached_metadata.owner = "owner";
+  uncached_metadata.local_path = "E:/video/fresh.mp4";
+  uncached_metadata.mail_folder = mailbox;
+  uncached_metadata.block_seq = 1;
+  uncached_metadata.block_count = 1;
+
+  TestTransport transport;
+  transport.search_result = {100, 101, 102};
+  transport.metadata_by_uid.emplace(102, uncached_metadata.to_legacy_text());
+
+  mailfs::core::model::AppConfig config;
+  config.credential_file = credential_path.u8string();
+  config.cache_fetch_batch_size = 8;
+  mailfs::application::MailfsService service(config, transport, repository);
+
+  const auto results = service.deduplicate_mailbox(mailbox);
+
+  EXPECT_TRUE(results.empty());
+  ASSERT_EQ(transport.fetch_batches.size(), 1u);
+  EXPECT_EQ(transport.fetch_batches.front(), (std::vector<std::uint64_t>{102}));
 
   std::filesystem::remove(credential_path);
 }
