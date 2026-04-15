@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <condition_variable>
@@ -24,6 +25,7 @@
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -435,6 +437,7 @@ HttpImapDownloadServer::HttpImapDownloadServer(core::model::AppConfig config, Do
 }
 
 HttpImapDownloadServer::~HttpImapDownloadServer() {
+  stop();
   {
     std::lock_guard<std::mutex> lock(prefetch_mutex_);
     stop_prefetch_worker_ = true;
@@ -446,6 +449,11 @@ HttpImapDownloadServer::~HttpImapDownloadServer() {
   if (prefetch_worker_.joinable()) {
     prefetch_worker_.join();
   }
+}
+
+void HttpImapDownloadServer::stop() {
+  stop_serving_.store(true);
+  prefetch_cv_.notify_all();
 }
 
 HttpResponse HttpImapDownloadServer::make_text_response(int status_code, std::string body) const {
@@ -927,7 +935,29 @@ void HttpImapDownloadServer::serve() {
 
   SocketCloser listener(listen_socket);
   infra::logging::log_info("http", "HTTP-to-IMAP server listening on " + config_.http_listen_addr);
-  for (;;) {
+  while (!stop_serving_.load()) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(listener.socket, &read_fds);
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 250000;
+
+#ifdef _WIN32
+    const auto ready = select(0, &read_fds, nullptr, nullptr, &timeout);
+#else
+    const auto ready = select(listener.socket + 1, &read_fds, nullptr, nullptr, &timeout);
+#endif
+    if (ready < 0) {
+      if (stop_serving_.load()) {
+        break;
+      }
+      continue;
+    }
+    if (ready == 0 || !FD_ISSET(listener.socket, &read_fds)) {
+      continue;
+    }
+
     sockaddr_storage client_addr{};
     socklen_t client_len = sizeof(client_addr);
     const auto client =
@@ -940,6 +970,7 @@ void HttpImapDownloadServer::serve() {
       handle_client(static_cast<std::intptr_t>(client));
     }).detach();
   }
+  infra::logging::log_info("http", "HTTP-to-IMAP server stopped on " + config_.http_listen_addr);
 }
 
 }  // namespace mailfs::application

@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MAILFS_BUILD_TESTS "Build unit tests" ON)
+option(MAILFS_BUILD_CLI "Build command line tool" ON)
 
 include(FetchContent)
 
@@ -30,14 +31,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(sqlite_amalgamation)
 
-FetchContent_Declare(
-  log4cplus
-  URL https://github.com/log4cplus/log4cplus/releases/download/REL_2_1_2/log4cplus-2.1.2.tar.xz
-)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(LOG4CPLUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(LOG4CPLUS_BUILD_LOGGINGSERVER OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(log4cplus)
+if(NOT ANDROID)
+  FetchContent_Declare(
+    log4cplus
+    URL https://github.com/log4cplus/log4cplus/releases/download/REL_2_1_2/log4cplus-2.1.2.tar.xz
+  )
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  set(LOG4CPLUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(LOG4CPLUS_BUILD_LOGGINGSERVER OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(log4cplus)
+endif()
+
+set(MAILFS_LOGGING_SOURCE src/infra/logging/logger.cpp)
+if(ANDROID)
+  set(MAILFS_LOGGING_SOURCE src/infra/logging/android_logger.cpp)
+endif()
 
 add_library(sqlite3_vendor STATIC
   ${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c
@@ -58,7 +66,7 @@ add_library(mailfs_core
   src/infra/imap/imap_client.cpp
   src/infra/imap/imap_response_parser.cpp
   src/infra/imap/imap_utf7.cpp
-  src/infra/logging/logger.cpp
+  ${MAILFS_LOGGING_SOURCE}
   src/infra/net/secure_socket.cpp
   src/infra/platform/utf8.cpp
   src/infra/storage/sqlite_cache_repository.cpp
@@ -71,13 +79,18 @@ target_include_directories(mailfs_core
 
 target_link_libraries(mailfs_core
   PUBLIC
-    log4cplus::log4cplus
     nlohmann_json::nlohmann_json
     mbedtls
     mbedx509
     mbedcrypto
     sqlite3_vendor
 )
+
+if(ANDROID)
+  target_link_libraries(mailfs_core PUBLIC log)
+else()
+  target_link_libraries(mailfs_core PUBLIC log4cplus::log4cplus)
+endif()
 
 if(WIN32)
   target_link_libraries(mailfs_core PUBLIC ws2_32)
@@ -89,11 +102,13 @@ else()
   target_compile_options(mailfs_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(mailfs_cli
-  src/app/cli/main.cpp
-)
+if(MAILFS_BUILD_CLI)
+  add_executable(mailfs_cli
+    src/app/cli/main.cpp
+  )
 
-target_link_libraries(mailfs_cli PRIVATE mailfs_core)
+  target_link_libraries(mailfs_cli PRIVATE mailfs_core)
+endif()
 
 if(MAILFS_BUILD_TESTS)
   include(CTest)

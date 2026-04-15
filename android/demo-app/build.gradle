@@ -1,0 +1,20 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.mailfs.demo"
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "com.mailfs.demo"
+        minSdk 28
+        targetSdk 33
+        versionCode 1
+        versionName "0.1.0"
+    }
+}
+
+dependencies {
+    implementation project(":mailfs-aar")
+}

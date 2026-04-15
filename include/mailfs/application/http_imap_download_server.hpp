@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <condition_variable>
 #include <deque>
@@ -57,6 +58,7 @@ class HttpImapDownloadServer {
 
   HttpResponse handle_request(const HttpRequest& request);
   void serve();
+  void stop();
 
  private:
   core::model::AppConfig config_;
@@ -127,6 +129,7 @@ class HttpImapDownloadServer {
   std::thread prefetch_worker_;
   bool stop_prefetch_worker_ = false;
   std::uint64_t next_prefetch_session_id_ = 1;
+  std::atomic_bool stop_serving_{false};
 };
 
 }  // namespace mailfs::application
