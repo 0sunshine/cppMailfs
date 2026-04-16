@@ -2,11 +2,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:allowBackup="false"
         android:label="MailFS Demo"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -15,6 +20,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".HttpServerActivity" android:exported="false" />
+        <activity android:name=".ListMailboxesActivity" android:exported="false" />
+        <activity android:name=".CacheMailboxActivity" android:exported="false" />
+        <activity android:name=".ListCacheActivity" android:exported="false" />
+        <activity android:name=".CheckIntegrityActivity" android:exported="false" />
+        <activity android:name=".DedupMailboxActivity" android:exported="false" />
+        <activity android:name=".DeleteUidActivity" android:exported="false" />
+        <activity android:name=".ExportPlaylistActivity" android:exported="false" />
+        <activity android:name=".UploadActivity" android:exported="false" />
+        <activity android:name=".DownloadActivity" android:exported="false" />
+        <activity
+            android:name=".PlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
+            android:exported="false" />
 
         <service
             android:name=".MailfsHttpServerService"

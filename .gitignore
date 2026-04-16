@@ -36,3 +36,4 @@ __pycache__/
 *.keystore
 *.apk
 *.aar
+!/android/demo-app/libs/*.aar

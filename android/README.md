@@ -40,6 +40,15 @@ The demo also exposes the CLI commands:
 - `download`
 - `serve-http`
 
+Each command opens in its own Activity from the demo home screen. For uploads, the `Upload` screen has
+file and folder picker buttons. Picked `content://` items are copied into the app cache import directory
+first, then uploaded through the native `upload` command. `List cache` renders a local-path tree with
+expandable folders; tapping a cached file starts the bundled ARtc player with that file's HTTP URL, and
+long-pressing a file opens its details.
+
+The demo app packages the external `artcplayer_release_1.0.15_2026030516.aar` player from the sibling
+player demo and currently restricts the APK ABI to `arm64-v8a` to match that player package.
+
 You can run the same commands from the AAR:
 
 ```java

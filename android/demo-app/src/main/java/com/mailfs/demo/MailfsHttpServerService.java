@@ -3,10 +3,12 @@ package com.mailfs.demo;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 import com.mailfs.android.MailfsHttpServer;
 
@@ -27,6 +29,7 @@ public final class MailfsHttpServerService extends Service {
     private static final int NOTIFICATION_ID = 1001;
 
     private final MailfsHttpServer server = new MailfsHttpServer();
+    private PowerManager.WakeLock wakeLock;
 
     @Override
     public void onCreate() {
@@ -59,13 +62,16 @@ public final class MailfsHttpServerService extends Service {
             boolean started = server.start(this, config);
             if (!started) {
                 startForeground(NOTIFICATION_ID, buildNotification("Failed: " + server.getLastError()));
+                releaseWakeLock();
                 stopSelf();
                 return START_NOT_STICKY;
             }
+            acquireWakeLock();
             startForeground(NOTIFICATION_ID, buildNotification("Serving on " + config.listenAddr));
             return START_STICKY;
         } catch (Exception ex) {
             startForeground(NOTIFICATION_ID, buildNotification("Failed: " + ex.getMessage()));
+            releaseWakeLock();
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -73,6 +79,7 @@ public final class MailfsHttpServerService extends Service {
 
     @Override
     public void onDestroy() {
+        releaseWakeLock();
         server.stop();
         super.onDestroy();
     }
@@ -97,6 +104,14 @@ public final class MailfsHttpServerService extends Service {
     }
 
     private Notification buildNotification(String text) {
+        Intent openIntent = new Intent(this, HttpServerActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                openIntent,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+                        : PendingIntent.FLAG_UPDATE_CURRENT);
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
@@ -104,8 +119,29 @@ public final class MailfsHttpServerService extends Service {
                 .setSmallIcon(R.drawable.ic_mailfs_service)
                 .setContentTitle("MailFS HTTP server")
                 .setContentText(text)
+                .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build();
+    }
+
+    private void acquireWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            return;
+        }
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        if (powerManager == null) {
+            return;
+        }
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MailFSDemo:HttpServer");
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire();
+    }
+
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
+        wakeLock = null;
     }
 
     private static String readListenAddr(Intent intent) {

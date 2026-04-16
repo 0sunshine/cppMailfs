@@ -46,6 +46,10 @@ public final class MailfsHttpServer implements AutoCloseable {
         }
     }
 
+    public interface ProgressListener {
+        void onProgress(String action, long done, long total, String message);
+    }
+
     public synchronized boolean start(Context context, Config config) throws IOException {
         PreparedConfig prepared = prepareConfig(context, config);
 
@@ -69,6 +73,14 @@ public final class MailfsHttpServer implements AutoCloseable {
     }
 
     public synchronized String runCommand(Context context, Config config, Command command) throws IOException {
+        return runCommand(context, config, command, null);
+    }
+
+    public synchronized String runCommand(
+            Context context,
+            Config config,
+            Command command,
+            ProgressListener progressListener) throws IOException {
         PreparedConfig prepared = prepareConfig(context, config);
         try {
             JSONObject root = new JSONObject();
@@ -78,7 +90,10 @@ public final class MailfsHttpServer implements AutoCloseable {
             root.put("outputPath", valueOrEmpty(command.outputPath));
             root.put("uid", command.uid);
             root.put("config", prepared.toJson());
-            return MailfsNative.runCommand(root.toString());
+            if (progressListener == null) {
+                return MailfsNative.runCommand(root.toString());
+            }
+            return MailfsNative.runCommandWithProgress(root.toString(), progressListener);
         } catch (JSONException ex) {
             throw new IOException("Failed to build command request", ex);
         }

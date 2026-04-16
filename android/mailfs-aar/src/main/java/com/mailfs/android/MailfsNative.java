@@ -33,4 +33,6 @@ final class MailfsNative {
     static native String lastError();
 
     static native String runCommand(String requestJson);
+
+    static native String runCommandWithProgress(String requestJson, MailfsHttpServer.ProgressListener progressListener);
 }

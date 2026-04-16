@@ -5,6 +5,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -111,6 +112,78 @@ void configure_logger(const mailfs::core::model::AppConfig& config) {
   });
 }
 
+std::string format_count_progress(std::size_t done, std::size_t total) {
+  std::ostringstream text;
+  text << "cache progress: " << done << '/' << total;
+  if (total > 0) {
+    text << " (" << std::fixed << std::setprecision(1)
+         << (static_cast<double>(done) * 100.0 / static_cast<double>(total)) << "%)";
+  }
+  return text.str();
+}
+
+struct ProgressReporter {
+  JNIEnv* env = nullptr;
+  jobject callback = nullptr;
+  jmethodID method = nullptr;
+
+  void emit(const char* action, std::size_t done, std::size_t total, const std::string& message) const {
+    if (env == nullptr || callback == nullptr || method == nullptr) {
+      return;
+    }
+
+    jstring action_text = env->NewStringUTF(action);
+    jstring message_text = env->NewStringUTF(message.c_str());
+    if (action_text == nullptr || message_text == nullptr) {
+      if (action_text != nullptr) {
+        env->DeleteLocalRef(action_text);
+      }
+      if (message_text != nullptr) {
+        env->DeleteLocalRef(message_text);
+      }
+      return;
+    }
+
+    env->CallVoidMethod(callback,
+                        method,
+                        action_text,
+                        static_cast<jlong>(done),
+                        static_cast<jlong>(total),
+                        message_text);
+    env->DeleteLocalRef(action_text);
+    env->DeleteLocalRef(message_text);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+  }
+};
+
+ProgressReporter progress_reporter_from_callback(JNIEnv* env, jobject callback) {
+  if (callback == nullptr) {
+    return {};
+  }
+
+  jclass callback_class = env->GetObjectClass(callback);
+  if (callback_class == nullptr) {
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+    return {};
+  }
+
+  jmethodID method =
+      env->GetMethodID(callback_class, "onProgress", "(Ljava/lang/String;JJLjava/lang/String;)V");
+  env->DeleteLocalRef(callback_class);
+  if (method == nullptr) {
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+    return {};
+  }
+
+  return ProgressReporter{env, callback, method};
+}
+
 std::string resolve_mailbox(const mailfs::core::model::AppConfig& config,
                             const std::string& explicit_mailbox,
                             const std::string& command) {
@@ -123,7 +196,7 @@ std::string resolve_mailbox(const mailfs::core::model::AppConfig& config,
   throw std::runtime_error("mailbox is required for " + command + " because default mailbox is not configured");
 }
 
-std::string run_mailfs_command(const nlohmann::json& request) {
+std::string run_mailfs_command(const nlohmann::json& request, const ProgressReporter& progress_reporter = {}) {
   const auto config = config_from_json(request.at("config"));
   configure_logger(config);
 
@@ -153,7 +226,18 @@ std::string run_mailfs_command(const nlohmann::json& request) {
 
   if (command == "cache-mailbox") {
     const auto mailbox = resolve_mailbox(config, mailbox_arg, command);
-    const auto count = service.cache_mailbox(mailbox);
+    std::size_t last_done = static_cast<std::size_t>(-1);
+    std::size_t last_total = static_cast<std::size_t>(-1);
+    const auto count = service.cache_mailbox(mailbox, [&](std::size_t done, std::size_t total) {
+      if (done == last_done && total == last_total) {
+        return;
+      }
+      last_done = done;
+      last_total = total;
+      const auto progress_text = format_count_progress(done, total);
+      output << progress_text << '\n';
+      progress_reporter.emit("cache-mailbox", done, total, progress_text);
+    });
     output << "cached messages: " << count << '\n';
     return output.str();
   }
@@ -397,6 +481,29 @@ Java_com_mailfs_android_MailfsNative_runCommand(JNIEnv* env, jclass, jstring req
     const auto request_text = java_string(env, request_json);
     const auto request = nlohmann::json::parse(request_text);
     const auto result = run_mailfs_command(request);
+    set_last_error({});
+    return env->NewStringUTF(result.c_str());
+  } catch (const std::exception& ex) {
+    const auto error = std::string("error: ") + ex.what() + "\n";
+    set_last_error(ex.what());
+    return env->NewStringUTF(error.c_str());
+  } catch (...) {
+    const std::string error = "error: unknown native command error\n";
+    set_last_error("unknown native command error");
+    return env->NewStringUTF(error.c_str());
+  }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_mailfs_android_MailfsNative_runCommandWithProgress(JNIEnv* env,
+                                                            jclass,
+                                                            jstring request_json,
+                                                            jobject progress_callback) {
+  try {
+    const auto request_text = java_string(env, request_json);
+    const auto request = nlohmann::json::parse(request_text);
+    const auto progress_reporter = progress_reporter_from_callback(env, progress_callback);
+    const auto result = run_mailfs_command(request, progress_reporter);
     set_last_error({});
     return env->NewStringUTF(result.c_str());
   } catch (const std::exception& ex) {
